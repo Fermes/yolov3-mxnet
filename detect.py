@@ -1,9 +1,11 @@
 import os
 import time
 from mxnet.gluon import nn
+
 from util_mxnet import *
 from darknet_mxnet import DarkNet
 import mxnet as mx
+
 
 def parse_cfg(cfgfile):
     """
@@ -157,7 +159,7 @@ class Darknet(nn.Block):
         for i, module in enumerate(modules):
             module_type = (module["type"])
 
-            print("{}  {}  \n{}\n".format(i, self.module_list[i], x.reshape((-1, ))[:6]))
+            print("{}  {}  \n{}\n".format(i, self.module_list[i], x.reshape((-1,))[:6]))
 
             if module_type == "convolutional":
                 x = self.module_list[i](x)
@@ -367,15 +369,15 @@ if __name__ == '__main__':
     nms_thresh = 0.4
     dst_dir = "./results"
     start = 0
-    classes = load_classes("data/coco.names")
-    # classes = ["aeroplane", "bicycle", "bird", "boat", "bottle", "bus", "car", "cat", "chair",
-    #            "cow", "diningtable", "dog", "horse", "motorbike", "person", "pottedplant",
-    #            "sheep", "sofa", "train", "tvmonitor"]
+    # classes = load_classes("data/coco.names")
+    classes = ["aeroplane", "bicycle", "bird", "boat", "bottle", "bus", "car", "cat", "chair",
+               "cow", "diningtable", "dog", "horse", "motorbike", "person", "pottedplant",
+               "sheep", "sofa", "train", "tvmonitor"]
     num_classes = len(classes)
     net = DarkNet(num_classes=num_classes)
     net.initialize()
     input_dim = 416
-    ctx = mx.cpu()
+    ctx = [mx.gpu(5)]
     try:
         imlist = [os.path.join(images, img) for img in os.listdir(images)]
     except NotADirectoryError:
@@ -396,15 +398,15 @@ if __name__ == '__main__':
     output = net(im_batches[0].expand_dims(0))
     # for module in net.collect_params():
     #   module.initialize(force_reinit=True)
-    net.load_weights("yolov3.weights")
+    # net.load_weights("yolov3.weights")
     # net.hybridize()
-    # net.load_params("models/yolov3_4_loss_46.212.params")
+    net.load_params("models/yolov3_33_loss_0.129.params")
 
     write = 0
 
     start_det_loop = time.time()
     anchors = [(10, 13), (16, 30), (33, 23), (30, 61), (62, 45),
-                        (59, 119), (116, 90), (156, 198), (373, 326)]
+               (59, 119), (116, 90), (156, 198), (373, 326)]
     for i, batch in enumerate(im_batches):
         # load the image
         start = time.time()
@@ -418,7 +420,7 @@ if __name__ == '__main__':
             base = (3 - j) * 3
             tmp_anchors = [anchors[base - 3], anchors[base - 2], anchors[base - 1]]
             xywh, score, cls = predict_transform(prediction[j], 416, tmp_anchors,
-                                                 num_classes, stride=416//(pow(2, j) * 13), is_train=False)
+                                                 num_classes, stride=416 // (pow(2, j) * 13))
             prediction[j] = nd.concat(xywh, score, cls, dim=2)
             # prediction[j] = predict_transform(prediction[j], 416, tmp_anchors,
             #                                   num_classes, stride=416//(pow(2, j) * 13))

@@ -22,6 +22,8 @@ def bbox_iou(box1, box2, mode="xywh"):
         tmp_box2[:, 2] = box2[:, 0] + box2[:, 2] / 2.0
         tmp_box2[:, 3] = box2[:, 1] + box2[:, 3] / 2.0
         box2 = tmp_box2
+    box1[:, 0:] = np.where(box1[:, 0:] > 0., box1[:, 0:], np.zeros_like(box1[:, 0:], dtype="float32"))
+    box2[:, 0:] = np.where(box2[:, 0:] > 0., box2[:, 0:], np.zeros_like(box2[:, 0:], dtype="float32"))
     # Get the coordinates of bounding boxes
     b1_x1, b1_y1, b1_x2, b1_y2 = box1[:, 0], box1[:, 1], box1[:, 2], box1[:, 3]
     b2_x1, b2_y1, b2_x2, b2_y2 = box2[:, 0], box2[:, 1], box2[:, 2], box2[:, 3]
@@ -42,10 +44,11 @@ def bbox_iou(box1, box2, mode="xywh"):
     b1_area = (b1_x2 - b1_x1 + 1) * (b1_y2 - b1_y1 + 1)
     b2_area = (b2_x2 - b2_x1 + 1) * (b2_y2 - b2_y1 + 1)
     iou = inter_area / (b1_area + b2_area - inter_area)
+    iou = np.where(iou > 0.1, iou, np.zeros_like(iou))
     return iou
 
 
-def predict_transform(prediction, inp_dim, anchors, num_classes, stride, is_train=True):
+def predict_transform(prediction, inp_dim, anchors, num_classes, stride):
     ctx = prediction.context
     batch_size = prediction.shape[0]
     stride = stride
@@ -100,11 +103,8 @@ def predict_transform(prediction, inp_dim, anchors, num_classes, stride, is_trai
 
     anchors = anchors.repeat(repeats=grid_size * grid_size, axis=0).expand_dims(0)
     wh_pred = prediction.slice_axis(begin=2, end=4, axis=-1)
-    wh_pred_1 = nd.exp(wh_pred) * anchors * stride
-    if is_train:
-        wh = nd.sqrt(nd.where(wh_pred_1 > 0, wh_pred_1, nd.zeros_like(wh_pred_1)))
-    else:
-        wh = wh_pred_1
+
+    wh = nd.exp(wh_pred) * anchors * stride
     cls_pred = prediction.slice_axis(begin=5, end=None, axis=-1)
     cls = nd.sigmoid(cls_pred)
     # prediction[:, :, 2:4] = nd.exp(prediction[:, :, 2:4]) * anchors
@@ -128,6 +128,10 @@ def predict_transform(prediction, inp_dim, anchors, num_classes, stride, is_trai
 
 def write_results(prediction, confidence, num_classes, nms_conf=0.4):
     conf_mask = (prediction[:, :, 4] > confidence).expand_dims(2)
+    for x_box in range(prediction.shape[0]):
+        for y_box in range(prediction.shape[1]):
+            if prediction[x_box, y_box, 4].asscalar() > confidence:
+                print(prediction[x_box, y_box])
     prediction = prediction * conf_mask
 
     box_corner = nd.zeros(prediction.shape, dtype="float32")
