@@ -9,79 +9,6 @@ from darknet_mxnet import DarkNet
 from util_mxnet import *
 
 
-def preprocess_true_boxes(label_file, input_shape, anchors, num_classes):
-    '''Preprocess true boxes to training input format
-
-    Parameters
-    ----------
-    true_boxes: array, shape=(m, T, 5)
-        Absolute x_min, y_min, x_max, y_max, class_id relative to input_shape.
-    input_shape: array-like, hw, multiples of 32
-    anchors: array, shape=(N, 2), wh
-    num_classes: integer
-
-    Returns
-    -------
-    y_true: list of array, shape like yolo_outputs, xywh are reletive value
-
-    '''
-    with open(label_file, "r") as file:
-        true_boxes = file.readlines()
-    true_boxes = np.array([list(map(float, x.split())) for x in true_boxes], dtype="float32")
-    true_boxes = true_boxes[:, :, [1, 2, 3, 4, 0]]
-    assert (true_boxes[..., 4] < num_classes).all(), 'class id must be less than num_classes'
-    num_layers = len(anchors) // 3  # default setting
-    anchor_mask = [[6, 7, 8], [3, 4, 5], [0, 1, 2]] if num_layers == 3 else [[3, 4, 5], [1, 2, 3]]
-
-    input_shape = np.array(input_shape, dtype='int32')
-    boxes_wh = true_boxes[..., 2:4]
-
-    m = true_boxes.shape[0]
-    grid_shapes = [input_shape // {0: 32, 1: 16, 2: 8}[l] for l in range(num_layers)]
-    y_true = [np.zeros((m, grid_shapes[l][0], grid_shapes[l][1], len(anchor_mask[l]), 5 + num_classes),
-                       dtype='float32') for l in range(num_layers)]
-
-    # Expand dim to apply broadcasting.
-    anchors = np.expand_dims(anchors, 0)
-    anchor_maxes = anchors / 2.
-    anchor_mins = -anchor_maxes
-    valid_mask = boxes_wh[..., 0] > 0
-
-    for b in range(m):
-        # Discard zero rows.
-        wh = boxes_wh[b, valid_mask[b]]
-        if len(wh) == 0:
-            continue
-        # Expand dim to apply broadcasting.
-        wh = np.expand_dims(wh, -2)
-        box_maxes = wh / 2.
-        box_mins = -box_maxes
-
-        intersect_mins = np.maximum(box_mins, anchor_mins)
-        intersect_maxes = np.minimum(box_maxes, anchor_maxes)
-        intersect_wh = np.maximum(intersect_maxes - intersect_mins, 0.)
-        intersect_area = intersect_wh[..., 0] * intersect_wh[..., 1]
-        box_area = wh[..., 0] * wh[..., 1]
-        anchor_area = anchors[..., 0] * anchors[..., 1]
-        iou = intersect_area / (box_area + anchor_area - intersect_area)
-
-        # Find best anchor for each true box
-        best_anchor = np.argmax(iou, axis=-1)
-
-        for t, n in enumerate(best_anchor):
-            for l in range(num_layers):
-                if n in anchor_mask[l]:
-                    i = np.floor(true_boxes[b, t, 0] * grid_shapes[l][1]).astype('int32')
-                    j = np.floor(true_boxes[b, t, 1] * grid_shapes[l][0]).astype('int32')
-                    k = anchor_mask[l].index(n)
-                    c = true_boxes[b, t, 4].astype('int32')
-                    y_true[l][b, j, i, k, 0:4] = true_boxes[b, t, 0:4]
-                    y_true[l][b, j, i, k, 4] = 1
-                    y_true[l][b, j, i, k, 5 + c] = 1
-
-    return y_true
-
-
 def parse_xml(xml_file, classes):
     root = ET.parse(xml_file).getroot()
     label = {}
@@ -121,11 +48,60 @@ def prep_label(label_file, num_classes, ctx):
             one_hot = np.zeros(shape=(num_classes + 5), dtype="float32")
             one_hot[5 + int(label[0])] = 1.0
             one_hot[4] = 1.0
-            one_hot[:4] = label[1:] * 416.0
+            one_hot[:4] = label[1:]
             final_labels[i] = one_hot
             i += 1
             i %= 30
         return nd.array(final_labels, ctx=ctx)
+
+
+def prep_final_label(labels, num_classes, ctx):
+    if isinstance(labels, nd.NDArray):
+        labels = labels.asnumpy()
+    input_dim = 416.0
+    anchors = np.array([(10, 13), (16, 30), (33, 23), (30, 61), (62, 45),
+                        (59, 119), (116, 90), (156, 198), (373, 326)])
+    batch_size = labels.shape[0]
+    label_1 = np.zeros(shape=(batch_size, 13, 13, 3, num_classes + 5), dtype="float32")
+    label_2 = np.zeros(shape=(batch_size, 26, 26, 3, num_classes + 5), dtype="float32")
+    label_3 = np.zeros(shape=(batch_size, 52, 52, 3, num_classes + 5), dtype="float32")
+
+    true_label_1 = np.zeros(shape=(batch_size, 13, 13, 3, 5), dtype="float32")
+    true_label_2 = np.zeros(shape=(batch_size, 26, 26, 3, 5), dtype="float32")
+    true_label_3 = np.zeros(shape=(batch_size, 52, 52, 3, 5), dtype="float32")
+    label_list = [label_3, label_2, label_1]
+    true_label_list = [true_label_3, true_label_2, true_label_1]
+    for x_box in range(labels.shape[0]):
+        for y_box in range(labels.shape[1]):
+            if labels[x_box, y_box, 4] == 0.0:
+                break
+
+            tmp_xywh = np.repeat(np.expand_dims(labels[x_box, y_box, :4] * input_dim, axis=0), repeats=anchors.shape[0], axis=0)
+            anchor_xywh = tmp_xywh.copy()
+            anchor_xywh[:, 2:4] = anchors
+            best_anchor = np.argmax(bbox_iou(tmp_xywh, anchor_xywh), axis=0)
+            grid_shape = np.power(2, 2 - best_anchor // 3) * 13
+            label = labels[x_box, y_box].copy()
+            tmp_idx = (label[:2] * grid_shape).astype("int")
+            label[:2] = label[:2] * grid_shape
+            label[:2] -= np.floor(label[:2])
+            label[2:4] = np.log(label[2:4] * input_dim / anchors[best_anchor])
+            label[np.isnan(label)] = 0.
+            label_list[best_anchor // 3][x_box, tmp_idx[1], tmp_idx[0], best_anchor % 3] = label
+
+            true_xywhs = labels[x_box, y_box, :5] * input_dim
+            true_xywhs[4] = 1.0
+            true_label_list[best_anchor // 3][x_box, tmp_idx[1], tmp_idx[0], best_anchor % 3] = true_xywhs
+    t_y = nd.concat(nd.array(label_1.reshape((batch_size, -1, num_classes + 5)), ctx=ctx),
+                     nd.array(label_2.reshape((batch_size, -1, num_classes + 5)), ctx=ctx),
+                     nd.array(label_3.reshape((batch_size, -1, num_classes + 5)), ctx=ctx),
+                     dim=1)
+    t_xywhs = nd.concat(nd.array(true_label_1.reshape((batch_size, -1, 5)), ctx=ctx),
+                     nd.array(true_label_2.reshape((batch_size, -1, 5)), ctx=ctx),
+                     nd.array(true_label_3.reshape((batch_size, -1, 5)), ctx=ctx),
+                     dim=1)
+
+    return t_y, t_xywhs
 
 
 class YoloDataSet(gluon.data.Dataset):
@@ -196,68 +172,31 @@ class MyThread(threading.Thread):
             return None
 
 
-def calculate_label(xywh, pred_score, labels):
-    label_len = labels.shape[2]
-    t_y = np.zeros(shape=(xywh.shape[0], xywh.shape[1], label_len), dtype="float32")
+def calculate_ignore(xywh, true_xywhs):
+    if isinstance(xywh, nd.NDArray):
+        xywh = xywh.asnumpy()
+    if isinstance(true_xywhs, nd.NDArray):
+        true_xywhs = true_xywhs.asnumpy()
+    xywh[np.isnan(xywh)] = 0.
+    ignore_mask = np.ones(shape=pred_score.shape, dtype="float32")
     iou_score_single_time = 0
-    for x_box in range(0, xywh.shape[0]):
+    item_index = np.argwhere(true_xywhs[:, :, 4] == 1.0)
+    for x_box, y_box in item_index:
         iou_score_start = time.time()
-        stride = 26
-        tmp_xy = (labels[x_box, :, :2] / 416.0 * stride).astype("int")
-        for y_box in range(507, 2535):
-            # if y_box < label_len * 3 * 13 * 13:
-            #     stride = 13
-            #     xy = [y_box // 3 // stride, y_box // 3 % stride]
-            # elif y_box < label_len * 3 * (13 * 13 + 26 * 26):
-            #     stride = 26
-            #     xy = [(y_box - 507) // 3 // stride, (y_box - 507) // 3 % stride]
-            # else:
-            #     stride = 52
-            #     xy = [(y_box - 2535) // 3 // stride, (y_box - 2535) // 3 % stride]
-
-            xy = [(y_box - 507) // 3 // 26, (y_box - 507) // 3 % 26]
-            item_index = []
-            for i in range(label_len):
-                if tmp_xy[i][0] == xy[0] and tmp_xy[i][1] == xy[1] and labels[x_box, i, 4] == 1.0:
-                    item_index.append(i)
-            if item_index:
-                tmp_xywh = np.repeat(np.expand_dims(xywh[x_box, y_box, :4], axis=0), repeats=len(item_index), axis=0)
-                tmp_tbox = labels[x_box, item_index, :4]
-                iou_list = bbox_iou(tmp_xywh, tmp_tbox, mode="xywh")
-                max_iou_score = np.max(iou_list)
-
-                base = (y_box - 507) // 3 * 3
-                bias = y_box - 507 - base
-
-                max_iou_idx = np.argmax(iou_list, axis=0).astype("int")
-
-                label = labels[x_box, item_index[max_iou_idx], :].copy()
-                label[2:4] = np.sqrt(label[2:4])
-                if max_iou_score > 0.6:
-                    # pred_score[x_box, [base // 4 + bias, y_box, 2535 + base * 4 + bias]] = 1.0
-                    pred_score[x_box, y_box] = 1.0
-                # else:
-                #     label[4] = max_iou_score
-                t_y[x_box, [base // 4 + bias, y_box, 2535 + base * 4 + bias]] = label
-                # t_y[x_box, y_box] = label
-                # if t_y[x_box, base // 4 + bias, 4] < max_iou_score:
-                #     t_y[x_box, base // 4 + bias] = label
-                # if t_y[x_box, y_box, 4] < max_iou_score:
-                #     t_y[x_box, y_box] = label
-                # if t_y[x_box, 2535 + base * 4 + bias, 4] < max_iou_score:
-                #     t_y[x_box, 2535 + base * 4 + bias] = label
+        iou = bbox_iou(xywh[x_box, y_box:y_box + 1], true_xywhs[x_box, y_box:y_box + 1]) < 0.6
+        ignore_mask[x_box, y_box:y_box + 1] = iou.astype("float32").reshape((-1, 1))
         iou_score_single_time += time.time() - iou_score_start
     print("iou score single time: {}".format(iou_score_single_time))
-
-    return t_y
+    return ignore_mask
 
 
 if __name__ == '__main__':
     classes = ["aeroplane", "bicycle", "bird", "boat", "bottle", "bus", "car", "cat", "chair",
                "cow", "diningtable", "dog", "horse", "motorbike", "person", "pottedplant",
                "sheep", "sofa", "train", "tvmonitor"]
+    num_classes = len(classes)
     ctx = [mx.gpu(4)]
-    batch_size = 12 * len(ctx)
+    batch_size = 32 * len(ctx)
     dataset = YoloDataSet("./data/train.txt", classes=classes, is_shuffle=True, ctx=ctx[0])
     train_data = gluon.data.DataLoader(dataset, batch_size=batch_size)
     sce_loss = gluon.loss.SigmoidBCELoss(from_sigmoid=True)
@@ -268,9 +207,9 @@ if __name__ == '__main__':
     cls_loss = LossRecorder('classification_loss')
     box_loss = LossRecorder('box_refine_loss')
     positive_weight = 1.0
-    negative_weight = 0.1
-    class_weight = 5.0
-    box_weight = 0.01
+    negative_weight = 0.5
+    class_weight = 1.0
+    box_weight = 5.0
 
     net = DarkNet(num_classes=len(classes))
     net.initialize(ctx=ctx)
@@ -280,11 +219,11 @@ if __name__ == '__main__':
     anchors = np.array([(10, 13), (16, 30), (33, 23), (30, 61), (62, 45),
                         (59, 119), (116, 90), (156, 198), (373, 326)])
     adam = mx.optimizer.Optimizer.create_optimizer("adam")
-    finetune_lr = dict({"conv_{}_weight".format(k): 0 for k in range(50)})
-    adam.set_learning_rate(0.001)
-    # adam.set_lr_mult(finetune_lr)
+    finetune_lr = dict({"conv_{}_weight".format(k): 1e-3 for k in [56, 57, 58, 64, 65, 66, 72, 73, 74]})
+    lr2 = dict({"conv_{}_bias".format(k): 1e-3 for k in [56, 57, 58, 64, 65, 66, 72, 73, 74]})
+    adam.set_learning_rate(1e-5)
+    adam.set_lr_mult({**finetune_lr, **lr2})
     trainer = gluon.Trainer(net.collect_params(), optimizer=adam)
-    num_classes = len(classes)
 
     for epoch in range(200):  # reset data iterators and metrics
         cls_loss.reset()
@@ -296,24 +235,29 @@ if __name__ == '__main__':
             gpu_y = split_and_load(batch[1], ctx)
             record_pause = 0
 
-
             def record(t_x):
                 ele_num = 3 * (5 + num_classes)
                 prediction = [t_x[:, :ele_num * 13 * 13],
                               t_x[:, ele_num * 13 * 13: ele_num * (13 * 13 + 26 * 26)],
                               t_x[:, ele_num * (13 * 13 + 26 * 26):]]
                 anchors_mask = [[6, 7, 8], [3, 4, 5], [0, 1, 2]]
-                xywh = None
+                xy = None
+                wh = None
                 score = None
                 cls_pred = None
                 for j in range(0, 3):
                     tmp_anchors = anchors[anchors_mask[j]]
-                    tmp_xywh, tmp_score, tmp_cls = predict_transform(prediction[j], 416, tmp_anchors,
-                                                                     num_classes, stride=416 // (pow(2, j) * 13))
-                    if xywh is None:
-                        xywh = tmp_xywh
+                    tmp_xy, tmp_wh, tmp_score, tmp_cls = predict_transform(prediction[j], 416, tmp_anchors,
+                                                                     num_classes, stride=416 // (pow(2, j) * 13),
+                                                                     is_train=True)
+                    if xy is None:
+                        xy = tmp_xy
                     else:
-                        xywh = nd.concat(xywh, tmp_xywh, dim=1)
+                        xy = nd.concat(xy, tmp_xy, dim=1)
+                    if wh is None:
+                        wh = tmp_wh
+                    else:
+                        wh = nd.concat(wh, tmp_wh, dim=1)
                     if score is None:
                         score = tmp_score
                     else:
@@ -322,25 +266,17 @@ if __name__ == '__main__':
                         cls_pred = tmp_cls
                     else:
                         cls_pred = nd.concat(cls_pred, tmp_cls, dim=1)
-                return xywh, score, cls_pred
+                return xy, wh, score, cls_pred
 
 
             with autograd.record():
                 prediction_list = [record(net(t_x)) for t_x in gpu_x]
-                # iou_list = []
-                # for p_i in range(len(prediction_list)):
-                #     thread = MyThread(calculate_label,
-                #                       args=(prediction_list[p_i][0], prediction_list[p_i][1], gpu_y[p_i]))
-                #     thread.start()
-                #     iou_list.append(thread)
-                # for thread in iou_list:
-                #     thread.join()
                 for p_i in range(len(prediction_list)):
-                    xywh, score, cls_pred = prediction_list[p_i]
-                    # tbox, tscore, tid, coordinate_weight, score_weight = iou_list[iou_i].get_result()
+                    pred_xy, pred_wh, pred_score, pred_cls = prediction_list[p_i]
                     with autograd.pause():
-                        t_y = calculate_label(xywh.asnumpy(), score.asnumpy(), gpu_y[p_i].asnumpy())
-                        t_y = nd.array(t_y, ctx=xywh.context)
+                        t_y, true_xywhs = prep_final_label(gpu_y[p_i], num_classes, ctx=pred_xy.context)
+                        ignore_mask = nd.array(calculate_ignore(nd.concat(pred_xy, pred_wh, dim=2).asnumpy(), true_xywhs)
+                                               , ctx=pred_xy.context)
                         tbox = t_y[:, :, :4]
                         tscore = t_y[:, :, 4].reshape(0, -1, 1)
                         tid = t_y[:, :, 5:]
@@ -348,45 +284,38 @@ if __name__ == '__main__':
                         score_weight = nd.where(coordinate_weight == 1.0,
                                                 nd.ones_like(coordinate_weight) * positive_weight,
                                                 nd.ones_like(coordinate_weight) * negative_weight)
-                        tbox[:, :, 2:] = nd.sqrt(tbox[:, :, 2:])
-                    xy = xywh.slice_axis(begin=0, end=2, axis=-1)
-                    wh = nd.sqrt(nd.abs(xywh.slice_axis(begin=2, end=4, axis=-1)) + 0.01)
-                    # total_num = 10647
-                    # nonzero_count = np.count_nonzero(tscore.asnumpy(), axis=1)
-                    # nonzero_count = np.where(nonzero_count > 0, nonzero_count, np.ones_like(nonzero_count))
-                    # nonzero_scale = nd.array(total_num / nonzero_count, ctx=score.context) \
-                    #     .reshape((-1))
-                    loss1 = sce_loss(cls_pred, tid, coordinate_weight * class_weight)
-                    loss2 = sce_loss(score, tscore, score_weight)
-                    loss3 = l2_loss(xy, tbox.slice_axis(begin=0, end=2, axis=-1), coordinate_weight * box_weight)
-                    loss4 = l2_loss(wh, tbox.slice_axis(begin=2, end=4, axis=-1), coordinate_weight * box_weight)
+
+                    # wh = nd.sqrt(nd.abs(xywh.slice_axis(begin=2, end=4, axis=-1)) + 0.01)
+                    zero_scale = 10647 / nd.mean(nd.sum(tscore, axis=1)).asscalar()
+                    box_loss_scale = 2 - t_y[:, :, 2:3] * t_y[:, :, 3:4]
                     item_index = np.argwhere(tscore.asnumpy() != 0.0)
-                    # print(xy[item_index[0][0], item_index[0][1]], tbox[item_index[0][0], item_index[0][1]])
-                    tmp_cls = cls_pred[item_index[0][0], item_index[0][1]]
-                    tmp_score = score[item_index[0][0], item_index[0][1]]
+
+                    loss1 = sce_loss(pred_cls, tid) * coordinate_weight * class_weight
+                    loss2 = sce_loss(pred_score, tscore) * score_weight * coordinate_weight * ignore_mask
+                    loss3 = sce_loss(pred_xy, tbox.slice_axis(begin=0, end=2, axis=-1)) * coordinate_weight * box_loss_scale
+                    loss4 = nd.square(tbox.slice_axis(begin=2, end=4, axis=-1) - pred_wh) * coordinate_weight \
+                            * 0.5 * box_loss_scale
+
+                    loss1 = nd.nansum(loss1) / batch_size
+                    loss2 = nd.nansum(loss2) / batch_size
+                    loss3 = nd.nansum(loss3) / batch_size
+                    loss4 = nd.nansum(loss4) / batch_size
+
+                    tmp_cls = pred_cls[item_index[0][0], item_index[0][1]]
+                    tmp_score = pred_score[item_index[0][0], item_index[0][1]]
                     item_index = np.argwhere(tid.asnumpy()[item_index[0][0], item_index[0][1]] == 1.0)
                     print(tmp_cls[item_index[0]])
                     print(tmp_score)
-                    # for x_box in range(cls_pred.shape[0]):
-                    #     for y_box in range(cls_pred.shape[1]):
-                    #         if tscore[x_box, y_box].asscalar() == 1:
-                    #             print(cls_pred[x_box][y_box], tid[x_box][y_box])
-                    #             flag = True
-                    #             break
-                    #     if flag:
-                    #         break
 
                     loss = loss1 + loss2 + loss3 + loss4
+                    loss.backward()
                     cls_loss.update(loss1)
                     obj_loss.update(loss2)
-                    box_loss.update(loss3)
-                    loss.backward()
-                loss = cls_loss.get()[1] + obj_loss.get()[1] + box_loss.get()[1]
-                # net.save_params("./models/yolov3_{}_loss_{:.3f}.params".format(epoch, loss))
+                    box_loss.update(loss3 + loss4)
+                    print("cls_loss: {:.5f}\nobj_loss: {:.5f}\nbox_loss: {:.5f}\n"
+                          .format(loss1.asscalar(), loss2.asscalar(), (loss3 + loss4).asscalar()))
             trainer.step(batch_size)
             print("batch: {} / {}".format(i, np.ceil(len(dataset) / batch_size)))
-            print("cls_loss: {:.5f}\nobj_loss: {:.5f}\nbox_loss: {:.5f}\n"
-                  .format(cls_loss.get()[1], obj_loss.get()[1], box_loss.get()[1]))
         nd.waitall()
         print('Epoch %2d, train %s %.5f, %s %.5f, %s %.5f time %.1f sec' % (
             epoch, *cls_loss.get(), *obj_loss.get(), *box_loss.get(), time.time() - tic))

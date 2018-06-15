@@ -22,8 +22,8 @@ def bbox_iou(box1, box2, mode="xywh"):
         tmp_box2[:, 2] = box2[:, 0] + box2[:, 2] / 2.0
         tmp_box2[:, 3] = box2[:, 1] + box2[:, 3] / 2.0
         box2 = tmp_box2
-    box1[:, 0:] = np.where(box1[:, 0:] > 0., box1[:, 0:], np.zeros_like(box1[:, 0:], dtype="float32"))
-    box2[:, 0:] = np.where(box2[:, 0:] > 0., box2[:, 0:], np.zeros_like(box2[:, 0:], dtype="float32"))
+    box1[box1 < 0.] = 0.
+    box2[box2 < 0.] = 0.
     # Get the coordinates of bounding boxes
     b1_x1, b1_y1, b1_x2, b1_y2 = box1[:, 0], box1[:, 1], box1[:, 2], box1[:, 3]
     b2_x1, b2_y1, b2_x2, b2_y2 = box2[:, 0], box2[:, 1], box2[:, 2], box2[:, 3]
@@ -44,11 +44,23 @@ def bbox_iou(box1, box2, mode="xywh"):
     b1_area = (b1_x2 - b1_x1 + 1) * (b1_y2 - b1_y1 + 1)
     b2_area = (b2_x2 - b2_x1 + 1) * (b2_y2 - b2_y1 + 1)
     iou = inter_area / (b1_area + b2_area - inter_area)
-    iou = np.where(iou > 0.1, iou, np.zeros_like(iou))
+    iou[iou < 0.05] = 0.
     return iou
 
 
-def predict_transform(prediction, inp_dim, anchors, num_classes, stride):
+def train_transform(label, inp_dim, anchors, stride):
+    stride = stride
+
+    if not isinstance(anchors, np.ndarray):
+        anchors = anchors.asnumpy()
+    # label[:, :2] = - np.log(1 / (label[:, :2] - label[:, :2].astype("int")) - 1)
+    label[:, :2] *= stride
+    label[:, :2] -= label[:, :2].astype("int")
+    label[:, 2:4] = np.log(label[:, 2:4] * inp_dim / anchors)
+    return label
+
+
+def predict_transform(prediction, inp_dim, anchors, num_classes, stride, is_train=False):
     ctx = prediction.context
     batch_size = prediction.shape[0]
     stride = stride
@@ -59,17 +71,15 @@ def predict_transform(prediction, inp_dim, anchors, num_classes, stride):
     prediction = prediction.reshape((batch_size, bbox_attrs * num_anchors, grid_size * grid_size))
     prediction = prediction.transpose(axes=(0, 2, 1))
     prediction = prediction.reshape((batch_size, grid_size * grid_size * num_anchors, bbox_attrs))
+
+    xy_pred = nd.sigmoid(prediction.slice_axis(begin=0, end=2, axis=-1))
+    wh_pred = prediction.slice_axis(begin=2, end=4, axis=-1)
+    score_pred = nd.sigmoid(prediction.slice_axis(begin=4, end=5, axis=-1))
+    cls_pred = nd.sigmoid(prediction.slice_axis(begin=5, end=None, axis=-1))
+    if is_train:
+        return xy_pred, wh_pred, score_pred, cls_pred
+
     anchors = [(a[0] / stride, a[1] / stride) for a in anchors]
-
-    # Sigmoid the  centre_X, centre_Y. and object confidencce
-    # mask_0 = nd.zeros(shape=prediction.shape, ctx=ctx)
-    # mask_0[:, :, (0, 1, 4)] = 1
-    #
-    # prediction_1 = (mask_0 == 0) * prediction + (mask_0 == 1) * nd.sigmoid(prediction)
-
-    score_pred = prediction.slice_axis(begin=4, end=5, axis=-1)
-    score = nd.sigmoid(score_pred)
-
     # Add the center offsets
     grid = np.arange(grid_size)
     a, b = np.meshgrid(grid, grid)
@@ -84,13 +94,7 @@ def predict_transform(prediction, inp_dim, anchors, num_classes, stride):
     x_y_offset = nd.concat(x_offset, y_offset, dim=1).repeat(repeats=num_anchors, axis=1).reshape((-1, 2)).expand_dims(
         0)
 
-    # mask_1 = nd.zeros(shape=prediction.shape, ctx=ctx)
-    # mask_1[:, :, :2] = 1
-    # tmp = nd.zeros(prediction.shape, ctx=ctx)
-    # tmp[:, :, :2] = x_y_offset
-    # prediction_2 = (mask_1 == 0) * prediction_1 + (mask_1 == 1) * (prediction_1 + tmp)
-    xy_pred = prediction.slice_axis(begin=0, end=2, axis=-1)
-    xy = (nd.sigmoid(xy_pred) + x_y_offset) * stride
+    xy = (xy_pred + x_y_offset) * stride
 
     # log space transform height and the width
     if not isinstance(anchors, nd.NDArray):
@@ -102,28 +106,10 @@ def predict_transform(prediction, inp_dim, anchors, num_classes, stride):
     #         anchors = anchors.cuda()
 
     anchors = anchors.repeat(repeats=grid_size * grid_size, axis=0).expand_dims(0)
-    wh_pred = prediction.slice_axis(begin=2, end=4, axis=-1)
 
     wh = nd.exp(wh_pred) * anchors * stride
-    cls_pred = prediction.slice_axis(begin=5, end=None, axis=-1)
-    cls = nd.sigmoid(cls_pred)
-    # prediction[:, :, 2:4] = nd.exp(prediction[:, :, 2:4]) * anchors
-    #
-    # prediction[:, :, 5: 5 + num_classes] = nd.sigmoid((prediction[:, :, 5: 5 + num_classes]))
 
-    # prediction[:, :, :4] *= stride
-    # mask_2 = nd.zeros(shape=prediction_2.shape, ctx=ctx)
-    # mask_2[:, :, 2:4] = 1
-    # tmp = nd.ones(shape=prediction_2.shape, ctx=ctx)
-    # tmp[:, :, 2:4] = anchors
-    # prediction_3 = (mask_2 == 0) * prediction_2 + (mask_2 == 1) * (nd.exp(prediction_2) * tmp)
-    # mask_3 = nd.zeros(shape=prediction_3.shape, ctx=ctx)
-    # mask_3[:, :, 5: 5 + num_classes] = 1
-    # prediction_4 = (mask_3 == 0) * prediction_3 + (mask_3 == 1) * nd.sigmoid(prediction_3)
-    # mask_4 = nd.zeros(prediction_4.shape, ctx=ctx)
-    # mask_4[:, :, :4] = 1
-
-    return nd.concat(*[xy, wh], dim=2), score, cls
+    return nd.concat(*[xy, wh, score_pred, cls_pred], dim=2)
 
 
 def write_results(prediction, confidence, num_classes, nms_conf=0.4):
