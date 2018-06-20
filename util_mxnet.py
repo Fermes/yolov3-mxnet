@@ -44,82 +44,60 @@ def bbox_iou(box1, box2, mode="xywh"):
     b1_area = (b1_x2 - b1_x1 + 1) * (b1_y2 - b1_y1 + 1)
     b2_area = (b2_x2 - b2_x1 + 1) * (b2_y2 - b2_y1 + 1)
     iou = inter_area / (b1_area + b2_area - inter_area)
-    iou[iou < 0.05] = 0.
+    iou[iou < 0] = 0.
     return iou
 
 
-def train_transform(label, inp_dim, anchors, stride):
-    stride = stride
+def train_transform(prediction, num_classes, stride):
+    batch_size = prediction.shape[0]
+    bbox_attrs = 5 + num_classes
 
-    if not isinstance(anchors, np.ndarray):
-        anchors = anchors.asnumpy()
-    # label[:, :2] = - np.log(1 / (label[:, :2] - label[:, :2].astype("int")) - 1)
-    label[:, :2] *= stride
-    label[:, :2] -= label[:, :2].astype("int")
-    label[:, 2:4] = np.log(label[:, 2:4] * inp_dim / anchors)
-    return label
+    prediction_1 = nd.transpose(prediction.reshape((batch_size, bbox_attrs * 3, stride * stride)), (0, 2, 1))\
+        .reshape(batch_size, stride * stride * 3, bbox_attrs)
+
+    xy_pred = nd.sigmoid(prediction_1.slice_axis(begin=0, end=2, axis=-1))
+    wh_pred = prediction_1.slice_axis(begin=2, end=4, axis=-1)
+    score_pred = nd.sigmoid(prediction_1.slice_axis(begin=4, end=5, axis=-1))
+    cls_pred = nd.sigmoid(prediction_1.slice_axis(begin=5, end=None, axis=-1))
+
+    return nd.concat(xy_pred, wh_pred, score_pred, cls_pred, dim=-1)
 
 
-def predict_transform(prediction, inp_dim, anchors, num_classes, stride, is_train=False):
+def predict_transform(prediction, anchors, num_classes, stride, confidence=0.5):
     ctx = prediction.context
     batch_size = prediction.shape[0]
-    stride = stride
-    grid_size = inp_dim // stride
     bbox_attrs = 5 + num_classes
     num_anchors = len(anchors)
 
-    prediction = prediction.reshape((batch_size, bbox_attrs * num_anchors, grid_size * grid_size))
-    prediction = prediction.transpose(axes=(0, 2, 1))
-    prediction = prediction.reshape((batch_size, grid_size * grid_size * num_anchors, bbox_attrs))
-
-    xy_pred = nd.sigmoid(prediction.slice_axis(begin=0, end=2, axis=-1))
-    wh_pred = prediction.slice_axis(begin=2, end=4, axis=-1)
-    score_pred = nd.sigmoid(prediction.slice_axis(begin=4, end=5, axis=-1))
-    cls_pred = nd.sigmoid(prediction.slice_axis(begin=5, end=None, axis=-1))
-    if is_train:
-        return xy_pred, wh_pred, score_pred, cls_pred
-
-    anchors = [(a[0] / stride, a[1] / stride) for a in anchors]
-    # Add the center offsets
-    grid = np.arange(grid_size)
+    item_index = np.argwhere(prediction[:, :, 4].asnumpy() > confidence)
+    if not isinstance(anchors, nd.NDArray):
+        anchors = nd.array(anchors)
+    grid = np.arange(stride)
     a, b = np.meshgrid(grid, grid)
 
-    x_offset = nd.array(a, dtype="float32", ctx=ctx).reshape((-1, 1))
-    y_offset = nd.array(b, dtype="float32", ctx=ctx).reshape((-1, 1))
+    x_offset = a.reshape((-1, 1))
+    y_offset = b.reshape((-1, 1))
+    x_y_offset = np.repeat(np.concatenate((x_offset, y_offset), 1), repeats=num_anchors, axis=1)
+    x_y_offset = nd.array(x_y_offset.reshape(-1, 2)).expand_dims(0)
+    prediction[:, :, :2] += x_y_offset
 
-    #     if CUDA:
-    #         x_offset = x_offset.cuda()
-    #         y_offset = y_offset.cuda()
+    anchors = anchors.repeat(repeats=stride * stride, axis=0).expand_dims(0)
+    prediction[:, :, :2] = prediction[:, :, :2] / stride * 416.0
+    prediction[:, :, 2:4] = nd.exp(prediction[:, :, 2:4]) * anchors
+    # for x_box, y_box in item_index:
+    #     prediction[x_box, y_box, :2] = prediction[x_box, y_box, :2] / stride * 416.0
+    #     prediction[x_box, y_box, 2:4] = nd.exp(prediction[x_box, y_box, 2:4]) \
+    #                                     * anchors[y_box // (stride * stride)]
 
-    x_y_offset = nd.concat(x_offset, y_offset, dim=1).repeat(repeats=num_anchors, axis=1).reshape((-1, 2)).expand_dims(
-        0)
-
-    xy = (xy_pred + x_y_offset) * stride
-
-    # log space transform height and the width
-    if not isinstance(anchors, nd.NDArray):
-        anchors = nd.array(anchors, dtype="float32", ctx=ctx)
-    else:
-        anchors = anchors.astype("float32").copyto(ctx)
-
-    #     if CUDA:
-    #         anchors = anchors.cuda()
-
-    anchors = anchors.repeat(repeats=grid_size * grid_size, axis=0).expand_dims(0)
-
-    wh = nd.exp(wh_pred) * anchors * stride
-
-    return nd.concat(*[xy, wh, score_pred, cls_pred], dim=2)
+    return prediction
 
 
-def write_results(prediction, confidence, num_classes, nms_conf=0.4):
+def write_results(prediction, num_classes, confidence=0.5, nms_conf=0.4):
     conf_mask = (prediction[:, :, 4] > confidence).expand_dims(2)
-    for x_box in range(prediction.shape[0]):
-        for y_box in range(prediction.shape[1]):
-            if prediction[x_box, y_box, 4].asscalar() > confidence:
-                print(prediction[x_box, y_box])
     prediction = prediction * conf_mask
 
+    batch_size = prediction.shape[0]
+    write = False
     box_corner = nd.zeros(prediction.shape, dtype="float32")
     box_corner[:, :, 0] = prediction[:, :, 0] - prediction[:, :, 2] / 2
     box_corner[:, :, 1] = prediction[:, :, 1] - prediction[:, :, 3] / 2
@@ -127,22 +105,17 @@ def write_results(prediction, confidence, num_classes, nms_conf=0.4):
     box_corner[:, :, 3] = prediction[:, :, 1] + prediction[:, :, 3] / 2
     prediction[:, :, :4] = box_corner[:, :, :4]
 
-    batch_size = prediction.shape[0]
-
-    write = False
-
     for ind in range(batch_size):
         image_pred = prediction[ind]
         # confidence threshholding
         # NMS
+
         max_conf = nd.max(image_pred[:, 5:5 + num_classes], axis=1)
         max_conf_score = nd.argmax(image_pred[:, 5:5 + num_classes], axis=1)
         max_conf = max_conf.astype("float32").expand_dims(1)
         max_conf_score = max_conf_score.astype("float32").expand_dims(1)
-        # seq = (image_pred[:, :5], max_conf, max_conf_score)
         image_pred = nd.concat(image_pred[:, :5], max_conf, max_conf_score, dim=1).asnumpy()
-
-        non_zero_ind = np.array(np.nonzero(image_pred[:, 4])).squeeze()
+        non_zero_ind = np.nonzero(image_pred[:, 4])
         try:
             image_pred_ = image_pred[non_zero_ind, :].reshape((-1, 7))
         except Exception as e:
@@ -157,7 +130,7 @@ def write_results(prediction, confidence, num_classes, nms_conf=0.4):
         for cls in img_classes:
             # get the detections with one particular class
             cls_mask = image_pred_ * np.expand_dims(image_pred_[:, -1] == cls, axis=1)
-            class_mask_ind = np.squeeze(np.nonzero(cls_mask[:, -2]))
+            class_mask_ind = np.nonzero(cls_mask[:, -2])
             image_pred_class = image_pred_[class_mask_ind].reshape((-1, 7))
 
             # sort the detections such that the entry with the maximum objectness
@@ -215,14 +188,14 @@ def letterbox_image(img, inp_dim):
     return canvas
 
 
-def prep_image(img, inp_dim, ctx=mx.cpu()):
+def prep_image(img, inp_dim):
     """
     Prepare image for inputting to the neural network.
 
     Returns a Variable
     """
     img = (letterbox_image(img, (inp_dim, inp_dim)))
-    img = nd.array(img.transpose((2, 0, 1)), ctx=ctx).astype("float32")
+    img = np.array(img.transpose((2, 0, 1))).astype("float32")
     img /= 255.0
     return img
 

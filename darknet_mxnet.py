@@ -146,8 +146,7 @@ class DarkNet(nn.Block):
         conv_81 = self.conv_bn_block_81(conv_80)
 
         # tmp_anchors = [self.anchors[i] for i in (6, 7, 8)]
-        # predict_82 = predict_transform(conv_81, self.input_dim, tmp_anchors, self.num_classes)
-        predict_82 = nn.Flatten()(conv_81)
+        predict_82 = train_transform(conv_81, self.num_classes, 13)
         detections = predict_82
         # predict_82 = conv_81.copy()
 
@@ -167,7 +166,8 @@ class DarkNet(nn.Block):
         # tmp_anchors = [self.anchors[i] for i in (3, 4, 5)]
         # predict_94 = predict_transform(conv_93, self.input_dim, tmp_anchors, self.num_classes)
         # detections = nd.concat(detections, predict_94, dim=1)
-        predict_94 = nn.Flatten()(conv_93)
+        # predict_94 = nn.Flatten()(conv_93)
+        predict_94 = train_transform(conv_93, self.num_classes, 26)
         detections = nd.concat(detections, predict_94, dim=1)
         # predict_94 = conv_93.copy()
 
@@ -187,7 +187,8 @@ class DarkNet(nn.Block):
         # tmp_anchors = [self.anchors[i] for i in (0, 1, 2)]
         # predict_106 = predict_transform(conv_105, self.input_dim, tmp_anchors, self.num_classes)
         # detections = nd.concat(detections, predict_106, dim=1)
-        predict_106 = nn.Flatten()(conv_105)
+        # predict_106 = nn.Flatten()(conv_105)
+        predict_106 = train_transform(conv_105, self.num_classes, 52)
         detections = nd.concat(detections, predict_106, dim=1)
         # predict_106 = conv_105.copy()
         return detections
