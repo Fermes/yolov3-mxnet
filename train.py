@@ -7,6 +7,30 @@ from mxnet import autograd
 from mxnet import gluon
 from darknet_mxnet import DarkNet
 from util_mxnet import *
+import argparse
+
+
+def arg_parse():
+    parser = argparse.ArgumentParser(description="YOLO v3 Detection Module")
+    parser.add_argument("--train_file", dest='train_file', help=
+    "Image / Directory containing images to perform detection upon",
+                        default="data/train.txt", type=str)
+    parser.add_argument("--classes", dest="classes", default="data/coco.names", type=str)
+    parser.add_argument("--gpu", dest="gpu", help="gpu id", default=0, type=int)
+    parser.add_argument("--dst_dir", dest='dst_dir', help=
+    "Image / Directory to store detections to",
+                        default="results", type=str)
+    parser.add_argument("--epoch", dest="epoch", default=200, type=int)
+    parser.add_argument("--batch_size", dest="batch_size", help="Batch size", default=16, type=int)
+    parser.add_argument("--confidence", dest="confidence", help="Object Confidence to filter predictions", default=0.5)
+    parser.add_argument("--nms_thresh", dest="nms_thresh", help="NMS Threshhold", default=0.7, type=float)
+    parser.add_argument("--params", dest='params', help=
+    "weightsfile", type=str)
+    parser.add_argument("--input_dim", dest='input_dim', help=
+    "Input resolution of the network. Increase to increase accuracy. Decrease to increase speed",
+                        default=416, type=int)
+
+    return parser.parse_args()
 
 
 def parse_xml(xml_file, classes):
@@ -87,23 +111,42 @@ def prep_final_label(labels, num_classes, ctx):
                 label = labels[x_box, y_box].copy()
                 tmp_idx = (label[:2] * stride).astype("int")
                 label[:2] = label[:2] * stride
-                label[:2] -= np.floor(label[:2])
+                label[:2] -= tmp_idx
                 label[2:4] = np.log(label[2:4] * input_dim / tmp_anchors[best_anchor] + 1e-16)
+
                 label_list[i][x_box, tmp_idx[1], tmp_idx[0], best_anchor] = label
 
                 true_xywhs = labels[x_box, y_box, :5] * input_dim
                 true_xywhs[4] = 1.0
                 true_label_list[i][x_box, tmp_idx[1], tmp_idx[0], best_anchor] = true_xywhs
     t_y = nd.concat(nd.array(label_1.reshape((batch_size, -1, num_classes + 5)), ctx=ctx),
-                     nd.array(label_2.reshape((batch_size, -1, num_classes + 5)), ctx=ctx),
-                     nd.array(label_3.reshape((batch_size, -1, num_classes + 5)), ctx=ctx),
-                     dim=1)
+                    nd.array(label_2.reshape((batch_size, -1, num_classes + 5)), ctx=ctx),
+                    nd.array(label_3.reshape((batch_size, -1, num_classes + 5)), ctx=ctx),
+                    dim=1)
     t_xywhs = nd.concat(nd.array(true_label_1.reshape((batch_size, -1, 5)), ctx=ctx),
-                     nd.array(true_label_2.reshape((batch_size, -1, 5)), ctx=ctx),
-                     nd.array(true_label_3.reshape((batch_size, -1, 5)), ctx=ctx),
-                     dim=1)
+                        nd.array(true_label_2.reshape((batch_size, -1, 5)), ctx=ctx),
+                        nd.array(true_label_3.reshape((batch_size, -1, 5)), ctx=ctx),
+                        dim=1)
 
     return t_y, t_xywhs
+
+
+def calculate_ignore(prediction, true_xywhs):
+    if isinstance(true_xywhs, nd.NDArray):
+        true_xywhs = true_xywhs.asnumpy()
+    prediction = predict_transform(prediction, anchors).asnumpy()
+    prediction[np.isnan(prediction)] = 0.
+    ignore_mask = np.ones(shape=pred_score.shape, dtype="float32")
+    # iou_score_single_time = 0
+    item_index = np.argwhere(true_xywhs[:, :, 4] == 1.0)
+
+    for x_box, y_box in item_index:
+        # iou_score_start = time.time()
+        iou = bbox_iou(prediction[x_box, y_box:y_box + 1, :4], true_xywhs[x_box, y_box:y_box + 1]) < 0.6
+        ignore_mask[x_box, y_box:y_box + 1] = iou.astype("float32").reshape((-1, 1))
+        # iou_score_single_time += time.time() - iou_score_start
+    # print("iou score single time: {}".format(iou_score_single_time))
+    return ignore_mask
 
 
 class YoloDataSet(gluon.data.Dataset):
@@ -174,37 +217,14 @@ class MyThread(threading.Thread):
             return None
 
 
-def calculate_ignore(xywh, true_xywhs):
-    if isinstance(xywh, nd.NDArray):
-        xywh = xywh.asnumpy()
-    if isinstance(true_xywhs, nd.NDArray):
-        true_xywhs = true_xywhs.asnumpy()
-    xywh[np.isnan(xywh)] = 0.
-    ignore_mask = np.ones(shape=pred_score.shape, dtype="float32")
-    # iou_score_single_time = 0
-    item_index = np.argwhere(true_xywhs[:, :, 4] == 1.0)
-
-    for x_box, y_box in item_index:
-        # iou_score_start = time.time()
-        iou = bbox_iou(xywh[x_box, y_box:y_box+1], true_xywhs[x_box, y_box:y_box+1]) < 0.6
-        ignore_mask[x_box, y_box:y_box+1] = iou.astype("float32").reshape((-1, 1))
-        # iou_score_single_time += time.time() - iou_score_start
-    # print("iou score single time: {}".format(iou_score_single_time))
-    return ignore_mask
-
-
 if __name__ == '__main__':
-    classes = ["aeroplane", "bicycle", "bird", "boat", "bottle", "bus", "car", "cat", "chair",
-               "cow", "diningtable", "dog", "horse", "motorbike", "person", "pottedplant",
-               "sheep", "sofa", "train", "tvmonitor"]
+    args = arg_parse()
+    classes = load_classes(args.classes)
     num_classes = len(classes)
-    ctx = [mx.gpu(4)]
-    batch_size = 32 * len(ctx)
-    dataset = YoloDataSet("./data/train.txt", classes=classes, is_shuffle=True, ctx=ctx[0])
+    ctx = try_gpu(args.gpu)
+    batch_size = args.batch_size
+    dataset = YoloDataSet(args.train_file, classes=classes, is_shuffle=True, ctx=ctx)
     train_data = gluon.data.DataLoader(dataset, batch_size=batch_size)
-    sce_loss = gluon.loss.SigmoidBCELoss(from_sigmoid=True)
-    l1_loss = gluon.loss.L1Loss()
-    l2_loss = gluon.loss.L2Loss()
 
     obj_loss = LossRecorder('objectness_loss')
     cls_loss = LossRecorder('classification_loss')
@@ -214,88 +234,91 @@ if __name__ == '__main__':
     class_weight = 1.0
     box_weight = 5.0
 
+    sce_loss = gluon.loss.SigmoidBCELoss(from_sigmoid=True)
+    l1_loss = gluon.loss.L1Loss()
+    l2_loss = gluon.loss.L2Loss()
+
     net = DarkNet(num_classes=len(classes))
     net.initialize(ctx=ctx)
-    X = nd.uniform(shape=(2, 3, 416, 416), ctx=ctx[0])
+    X = nd.uniform(shape=(1, 3, args.input_dim, args.input_dim), ctx=ctx)
     net(X)
-    net.load_weights("./data/yolov3.weights")
+    if args.params:
+        net.load_params(args.params)
+    else:
+        net.load_weights("./data/yolov3.weights")
+    net.conv_bn_block_81.initialize(ctx=ctx, init=mx.init.Xavier(), force_reinit=True)
+    net.conv_bn_block_93.initialize(ctx=ctx, init=mx.init.Xavier(), force_reinit=True)
+    net.conv_bn_block_105.initialize(ctx=ctx, init=mx.init.Xavier(), force_reinit=True)
     anchors = np.array([(10, 13), (16, 30), (33, 23), (30, 61), (62, 45),
                         (59, 119), (116, 90), (156, 198), (373, 326)])
     adam = mx.optimizer.Optimizer.create_optimizer("adam")
-    finetune_lr = dict({"conv_{}_weight".format(k): 1e-3 for k in [56, 57, 58, 64, 65, 66, 72, 73, 74]})
-    lr2 = dict({"conv_{}_bias".format(k): 1e-3 for k in [56, 57, 58, 64, 65, 66, 72, 73, 74]})
-    adam.set_learning_rate(1e-4)
+    finetune_lr = dict({"conv_{}_weight".format(k): 1e-3 for k in [58, 66, 74]})
+    lr2 = dict({"conv_{}_bias".format(k): 1e-3 for k in [58, 66, 74]})
+    adam.set_learning_rate(0.)
     adam.set_lr_mult({**finetune_lr, **lr2})
     trainer = gluon.Trainer(net.collect_params(), optimizer=adam)
 
-    for epoch in range(200):  # reset data iterators and metrics
+    for epoch in range(args.epoch):  # reset data iterators and metrics
         cls_loss.reset()
         obj_loss.reset()
         box_loss.reset()
         tic = time.time()
         for i, batch in enumerate(train_data):
-            gpu_x = split_and_load(batch[0], ctx)
-            gpu_y = split_and_load(batch[1], ctx)
+            gpu_x = batch[0]
+            gpu_y = batch[1]
             record_pause = 0
 
             with autograd.record():
-                prediction_list = [net(t_x) for t_x in gpu_x]
-                for p_i in range(len(prediction_list)):
-                    # pred_xy, pred_wh, pred_score, pred_cls = prediction_list[p_i]
-                    prediction = prediction_list[p_i]
-                    pred_xy = prediction[:, :, :2]
-                    pred_wh = prediction[:, :, 2:4]
-                    pred_score = prediction[:, :, 4:5]
-                    pred_cls = prediction[:, :, 5:]
-                    with autograd.pause():
-                        t_y, true_xywhs = prep_final_label(gpu_y[p_i], num_classes, ctx=pred_xy.context)
-                        ignore_mask = nd.array(calculate_ignore(nd.concat(pred_xy, pred_wh, dim=2).asnumpy(), true_xywhs)
-                                               , ctx=pred_xy.context)
-                        true_box = t_y[:, :, :4]
-                        true_score = t_y[:, :, 4:5]
-                        true_cls = t_y[:, :, 5:]
-                        coordinate_weight = (true_score != 0.0).astype("float32")
-                        score_weight = nd.where(coordinate_weight == 1.0,
-                                                nd.ones_like(coordinate_weight) * positive_weight,
-                                                nd.ones_like(coordinate_weight) * negative_weight)
+                prediction = net(gpu_x)
+                pred_xy = prediction[:, :, :2]
+                pred_wh = prediction[:, :, 2:4]
+                pred_score = prediction[:, :, 4:5]
+                pred_cls = prediction[:, :, 5:]
+                with autograd.pause():
+                    t_y, true_xywhs = prep_final_label(gpu_y, num_classes, ctx=pred_xy.context)
+                    ignore_mask = nd.array(calculate_ignore(prediction.copy(), true_xywhs)
+                                           , ctx=pred_xy.context)
+                    true_box = t_y[:, :, :4]
+                    true_score = t_y[:, :, 4:5]
+                    true_cls = t_y[:, :, 5:]
+                    coordinate_weight = (true_score != 0.0).astype("float32")
+                    score_weight = nd.where(coordinate_weight == 1.0,
+                                            nd.ones_like(coordinate_weight) * positive_weight,
+                                            nd.ones_like(coordinate_weight) * negative_weight)
 
-                    # wh = nd.sqrt(nd.abs(xywh.slice_axis(begin=2, end=4, axis=-1)) + 0.01)
-                    zero_scale = 10647 / nd.sum(true_score, axis=1)
-                    box_loss_scale = 2 - true_xywhs[:, :, 2:3] * true_xywhs[:, :, 3:4] / (416.0 * 416.0)
+                # wh = nd.sqrt(nd.abs(xywh.slice_axis(begin=2, end=4, axis=-1)) + 0.01)
+                zero_scale = prediction.shape[1] / nd.sum(true_score, axis=1)
+                box_loss_scale = 2 - true_xywhs[:, :, 2:3] * true_xywhs[:, :, 3:4] / (416.0 * 416.0)
 
-                    loss1 = sce_loss(pred_cls * coordinate_weight, true_cls * coordinate_weight) * zero_scale
-                    loss2 = sce_loss(pred_score * ignore_mask * score_weight, true_score * ignore_mask * score_weight)
+                loss1 = sce_loss(pred_cls, true_cls, coordinate_weight)
+                loss2 = sce_loss(pred_score, true_score, ignore_mask * score_weight)
 
-                    loss3 = sce_loss(pred_xy * coordinate_weight,
-                                     true_box.slice_axis(begin=0, end=2, axis=-1) * coordinate_weight) * zero_scale
-                    loss4 = l2_loss(true_box.slice_axis(begin=2, end=4, axis=-1) * coordinate_weight,
-                                    pred_wh * coordinate_weight) * 0.5 * zero_scale
+                loss3 = sce_loss(pred_xy,
+                                 true_box.slice_axis(begin=0, end=2, axis=-1), coordinate_weight)
+                loss4 = l2_loss(true_box.slice_axis(begin=2, end=4, axis=-1),
+                                pred_wh, coordinate_weight) * 0.5
 
-                    # loss1 = nd.nansum(loss1) / batch_size
-                    # loss2 = nd.nansum(loss2) / batch_size
-                    # loss3 = nd.nansum(loss3) / batch_size
-                    # loss4 = nd.nansum(loss4) / batch_size
-                    item_index = np.nonzero(true_score.asnumpy())
-                    print(nd.argmax(pred_cls[item_index[0][0], item_index[1][0]], axis=0).asscalar() ==
-                          nd.argmax(true_cls[item_index[0][0], item_index[1][0]], axis=0).asscalar())
-                    tmp_xywh = nd.concat(pred_xy[item_index[0][0], item_index[1][0]],
-                                         pred_wh[item_index[0][0], item_index[1][0]],
-                                         dim=0)
-                    t_xywh = t_y[item_index[0][0], item_index[1][0], :4]
-                    print(tmp_xywh, t_xywh[:4])
-                    tmp_score = pred_score[item_index[0][0], item_index[1][0]]
-                    print(tmp_score)
-                    # item_index = np.argwhere(true_cls.asnumpy()[item_index[0][0], item_index[0][1]] == 1.0)
-                    # item_index = np.clip(item_index, 1, 18)[0][0]
+                item_index = np.nonzero(true_score.asnumpy())
+                print(nd.argmax(pred_cls[item_index[0][0], item_index[1][0]], axis=0).asscalar() ==
+                      nd.argmax(true_cls[item_index[0][0], item_index[1][0]], axis=0).asscalar())
+                tmp_xywh = nd.concat(pred_xy[item_index[0][0], item_index[1][0]],
+                                     pred_wh[item_index[0][0], item_index[1][0]],
+                                     dim=0)
+                t_xywh = t_y[item_index[0][0], item_index[1][0], :4]
+                print(tmp_xywh, t_xywh[:4])
+                tmp_score = pred_score[item_index[0][0], item_index[1][0]]
+                print(tmp_score)
+                # item_index = np.argwhere(true_cls.asnumpy()[item_index[0][0], item_index[0][1]] == 1.0)
+                # item_index = np.clip(item_index, 1, 18)[0][0]
 
-                    loss = loss1 + loss2 + loss3 + loss4
-                    loss.backward()
-                    cls_loss.update(loss1)
-                    obj_loss.update(loss2)
-                    box_loss.update(loss3 + loss4)
-                    print("cls_loss: {:.5f}\nobj_loss: {:.5f}\nbox_loss: {:.5f}\n"
-                          .format(nd.nansum(loss1).asscalar() / batch_size, nd.nansum(loss2).asscalar() / batch_size,
-                                  nd.nansum(loss3 + loss4).asscalar() / batch_size))
+                loss = loss1 + loss2 + loss3 + loss4
+                loss.backward()
+                cls_loss.update(loss1)
+                obj_loss.update(loss2)
+                box_loss.update(loss3 + loss4)
+                print("cls_loss: {:.5f}\nobj_loss: {:.5f}\nbox_loss: {:.5f}\n"
+                      .format(nd.nansum(loss1).asscalar() / batch_size, nd.nansum(loss2).asscalar() / batch_size,
+                              nd.nansum(loss3 + loss4).asscalar() / batch_size))
             trainer.step(batch_size)
             print("batch: {} / {}".format(i, np.ceil(len(dataset) / batch_size)))
         nd.waitall()

@@ -1,8 +1,19 @@
 from __future__ import division
-import mxnet as mx
 import cv2
+import mxnet as mx
 import numpy as np
 from mxnet import nd
+
+
+def try_gpu(num):
+    """If GPU is available, return mx.gpu(0); else return mx.cpu()"""
+    try:
+        ctx = mx.gpu(num)
+        _ = nd.array([0], ctx=ctx)
+    except Exception as e:
+        print(e)
+        ctx = mx.cpu()
+    return ctx
 
 
 def bbox_iou(box1, box2, mode="xywh"):
@@ -22,8 +33,6 @@ def bbox_iou(box1, box2, mode="xywh"):
         tmp_box2[:, 2] = box2[:, 0] + box2[:, 2] / 2.0
         tmp_box2[:, 3] = box2[:, 1] + box2[:, 3] / 2.0
         box2 = tmp_box2
-    box1[box1 < 0.] = 0.
-    box2[box2 < 0.] = 0.
     # Get the coordinates of bounding boxes
     b1_x1, b1_y1, b1_x2, b1_y2 = box1[:, 0], box1[:, 1], box1[:, 2], box1[:, 3]
     b2_x1, b2_y1, b2_x2, b2_y2 = box2[:, 0], box2[:, 1], box2[:, 2], box2[:, 3]
@@ -38,13 +47,12 @@ def bbox_iou(box1, box2, mode="xywh"):
     inter_area = np.clip(inter_rect_x2 - inter_rect_x1 + 1, a_min=0, a_max=None) * np.clip(
         inter_rect_y2 - inter_rect_y1 + 1,
         a_min=0, a_max=None)
-    inter_area[inter_area < 5] = 0.
 
     # Union Area
     b1_area = (b1_x2 - b1_x1 + 1) * (b1_y2 - b1_y1 + 1)
     b2_area = (b2_x2 - b2_x1 + 1) * (b2_y2 - b2_y1 + 1)
     iou = inter_area / (b1_area + b2_area - inter_area)
-    iou[iou < 0] = 0.
+
     return iou
 
 
@@ -63,31 +71,26 @@ def train_transform(prediction, num_classes, stride):
     return nd.concat(xy_pred, wh_pred, score_pred, cls_pred, dim=-1)
 
 
-def predict_transform(prediction, anchors, num_classes, stride, confidence=0.5):
-    ctx = prediction.context
-    batch_size = prediction.shape[0]
-    bbox_attrs = 5 + num_classes
-    num_anchors = len(anchors)
-
-    item_index = np.argwhere(prediction[:, :, 4].asnumpy() > confidence)
+def predict_transform(prediction, anchors):
     if not isinstance(anchors, nd.NDArray):
-        anchors = nd.array(anchors)
-    grid = np.arange(stride)
-    a, b = np.meshgrid(grid, grid)
-
-    x_offset = a.reshape((-1, 1))
-    y_offset = b.reshape((-1, 1))
-    x_y_offset = np.repeat(np.concatenate((x_offset, y_offset), 1), repeats=num_anchors, axis=1)
-    x_y_offset = nd.array(x_y_offset.reshape(-1, 2)).expand_dims(0)
-    prediction[:, :, :2] += x_y_offset
-
-    anchors = anchors.repeat(repeats=stride * stride, axis=0).expand_dims(0)
-    prediction[:, :, :2] = prediction[:, :, :2] / stride * 416.0
-    prediction[:, :, 2:4] = nd.exp(prediction[:, :, 2:4]) * anchors
-    # for x_box, y_box in item_index:
-    #     prediction[x_box, y_box, :2] = prediction[x_box, y_box, :2] / stride * 416.0
-    #     prediction[x_box, y_box, 2:4] = nd.exp(prediction[x_box, y_box, 2:4]) \
-    #                                     * anchors[y_box // (stride * stride)]
+        anchors = nd.array(anchors, ctx=prediction.context)
+    batch_size = prediction.shape[0]
+    anchors_masks = [[6, 7, 8], [3, 4, 5], [0, 1, 2]]
+    strides = [13, 26, 52]
+    step = [(0, 507), (507, 2535), (2535, 10647)]
+    for i in range(3):
+        stride = strides[i]
+        grid = np.arange(stride)
+        a, b = np.meshgrid(grid, grid)
+        x_offset = nd.array(a.reshape((-1, 1)), ctx=prediction.context)
+        y_offset = nd.array(b.reshape((-1, 1)), ctx=prediction.context)
+        x_y_offset = nd.concat(x_offset, y_offset, dim=1).repeat(repeats=3, axis=0).reshape((-1, 2)).expand_dims(0)\
+            .repeat(repeats=batch_size, axis=0)
+        tmp_anchors = anchors[anchors_masks[i]].expand_dims(0).repeat(repeats=stride * stride, axis=0).reshape((-1, 2)) \
+            .expand_dims(0).repeat(repeats=batch_size, axis=0)
+        prediction[:, step[i][0]:step[i][1], :2] += x_y_offset
+        prediction[:, step[i][0]:step[i][1], :2] *= (416.0 / stride)
+        prediction[:, step[i][0]:step[i][1], 2:4] = nd.exp(prediction[:, step[i][0]:step[i][1], 2:4]) * tmp_anchors
 
     return prediction
 
@@ -109,7 +112,6 @@ def write_results(prediction, num_classes, confidence=0.5, nms_conf=0.4):
         image_pred = prediction[ind]
         # confidence threshholding
         # NMS
-
         max_conf = nd.max(image_pred[:, 5:5 + num_classes], axis=1)
         max_conf_score = nd.argmax(image_pred[:, 5:5 + num_classes], axis=1)
         max_conf = max_conf.astype("float32").expand_dims(1)
@@ -143,7 +145,10 @@ def write_results(prediction, num_classes, confidence=0.5, nms_conf=0.4):
                 # Get the IOUs of all boxes that come after the one we are looking at
                 # in the loop
                 try:
-                    ious = bbox_iou(np.expand_dims(image_pred_class[i], 0), image_pred_class[i + 1:])
+                    box1 = np.expand_dims(image_pred_class[i], 0)
+                    box2 = image_pred_class[i + 1:]
+                    box1 = np.repeat(box1, repeats=box2.shape[0], axis=0)
+                    ious = bbox_iou(box1, box2)
                 except ValueError:
                     break
                 except IndexError:
@@ -154,7 +159,7 @@ def write_results(prediction, num_classes, confidence=0.5, nms_conf=0.4):
                 image_pred_class[i + 1:] *= iou_mask
 
                 # Remove the non-zero entries
-                non_zero_ind = np.squeeze(np.nonzero(image_pred_class[:, 4]))
+                non_zero_ind = np.nonzero(image_pred_class[:, 4])
                 image_pred_class = image_pred_class[non_zero_ind].reshape((-1, 7))
 
             batch_ind = np.ones((image_pred_class.shape[0], 1)) * ind
