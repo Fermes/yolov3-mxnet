@@ -193,7 +193,7 @@ class DarkNet(nn.Block):
         # predict_106 = conv_105.copy()
         return detections
 
-    def load_weights(self, weightfile):
+    def load_weights(self, weightfile, fine_tune):
         # Open the weights file
         fp = open(weightfile, "rb")
 
@@ -260,6 +260,15 @@ class DarkNet(nn.Block):
 
         modules = self._children
         for block_name in modules:
+            if fine_tune:
+                if block_name.find("81") != -1:
+                    ptr = 56629087
+                    continue
+                elif block_name.find("93") != -1:
+                    ptr = 60898910
+                    continue
+                elif block_name.find("105") != -1:
+                    continue
             module = modules.get(block_name)
             if isinstance(module, nn.Sequential):
                 ptr = set_data(module, ptr)

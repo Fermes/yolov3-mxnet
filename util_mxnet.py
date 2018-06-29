@@ -52,7 +52,8 @@ def bbox_iou(box1, box2, mode="xywh"):
     b1_area = (b1_x2 - b1_x1 + 1) * (b1_y2 - b1_y1 + 1)
     b2_area = (b2_x2 - b2_x1 + 1) * (b2_y2 - b2_y1 + 1)
     iou = inter_area / (b1_area + b2_area - inter_area)
-
+    iou[inter_area >= b1_area] = 0.8
+    iou[inter_area >= b2_area] = 0.8
     return iou
 
 
@@ -71,7 +72,7 @@ def train_transform(prediction, num_classes, stride):
     return nd.concat(xy_pred, wh_pred, score_pred, cls_pred, dim=-1)
 
 
-def predict_transform(prediction, anchors):
+def predict_transform(prediction, input_dim, anchors):
     if not isinstance(anchors, nd.NDArray):
         anchors = nd.array(anchors, ctx=prediction.context)
     batch_size = prediction.shape[0]
@@ -88,8 +89,9 @@ def predict_transform(prediction, anchors):
             .repeat(repeats=batch_size, axis=0)
         tmp_anchors = anchors[anchors_masks[i]].expand_dims(0).repeat(repeats=stride * stride, axis=0).reshape((-1, 2)) \
             .expand_dims(0).repeat(repeats=batch_size, axis=0)
+
         prediction[:, step[i][0]:step[i][1], :2] += x_y_offset
-        prediction[:, step[i][0]:step[i][1], :2] *= (416.0 / stride)
+        prediction[:, step[i][0]:step[i][1], :2] *= (float(input_dim) / stride)
         prediction[:, step[i][0]:step[i][1], 2:4] = nd.exp(prediction[:, step[i][0]:step[i][1], 2:4]) * tmp_anchors
 
     return prediction
@@ -100,13 +102,15 @@ def write_results(prediction, num_classes, confidence=0.5, nms_conf=0.4):
     prediction = prediction * conf_mask
 
     batch_size = prediction.shape[0]
-    write = False
+
     box_corner = nd.zeros(prediction.shape, dtype="float32")
     box_corner[:, :, 0] = prediction[:, :, 0] - prediction[:, :, 2] / 2
     box_corner[:, :, 1] = prediction[:, :, 1] - prediction[:, :, 3] / 2
     box_corner[:, :, 2] = prediction[:, :, 0] + prediction[:, :, 2] / 2
     box_corner[:, :, 3] = prediction[:, :, 1] + prediction[:, :, 3] / 2
     prediction[:, :, :4] = box_corner[:, :, :4]
+
+    output = None
 
     for ind in range(batch_size):
         image_pred = prediction[ind]
@@ -166,16 +170,11 @@ def write_results(prediction, num_classes, confidence=0.5, nms_conf=0.4):
 
             seq = nd.concat(nd.array(batch_ind), nd.array(image_pred_class), dim=1)
 
-            if not write:
+            if output is None:
                 output = seq
-                write = True
             else:
                 output = nd.concat(output, seq, dim=0)
-
-    try:
-        return output
-    except:
-        return 0
+    return output
 
 
 def letterbox_image(img, inp_dim):

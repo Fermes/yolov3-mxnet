@@ -15,15 +15,15 @@ def arg_parse():
     parser.add_argument("--video", dest='video', help=
     "video file path", type=str)
     parser.add_argument("--classes", dest="classes", default="data/coco.names", type=str)
-    parser.add_argument("--gpu", dest="gpu", help="gpu id", default=5, type=int)
+    parser.add_argument("--gpu", dest="gpu", help="gpu id", default=0, type=int)
     parser.add_argument("--dst_dir", dest='dst_dir', help=
     "Image / Directory to store detections to",
                         default="results", type=str)
     parser.add_argument("--batch_size", dest="batch_size", help="Batch size", default=16, type=int)
-    parser.add_argument("--confidence", dest="confidence", help="Object Confidence to filter predictions", default=0.5)
-    parser.add_argument("--nms_thresh", dest="nms_thresh", help="NMS Threshhold", default=0.7, type=float)
+    parser.add_argument("--confidence", dest="confidence", help="Object Confidence", default=0.5, type=float)
+    parser.add_argument("--nms_thresh", dest="nms_thresh", help="NMS Threshhold", default=0.4, type=float)
     parser.add_argument("--params", dest='params', help=
-    "weightsfile", type=str)
+    "params file", type=str)
     parser.add_argument("--input_dim", dest='input_dim', help=
     "Input resolution of the network. Increase to increase accuracy. Decrease to increase speed",
                         default=416, type=int)
@@ -79,16 +79,16 @@ def draw_bbox(img, bboxs):
     return img
 
 
-def save_results(load_images, output):
+def save_results(load_images, output, input_dim):
     im_dim_list = nd.array([(x.shape[1], x.shape[0]) for x in load_images])
     im_dim_list = nd.tile(im_dim_list, 2)
     im_dim_list = im_dim_list[output[:, 0], :]
 
-    scaling_factor = nd.min(416.0 / im_dim_list, axis=1).reshape((-1, 1))
+    scaling_factor = input_dim / im_dim_list
     # scaling_factor = (416 / im_dim_list)[0].view(-1, 1)
 
-    output[:, [1, 3]] -= (416 - scaling_factor * im_dim_list[:, 0].reshape((-1, 1))) / 2
-    output[:, [2, 4]] -= (416 - scaling_factor * im_dim_list[:, 1].reshape((-1, 1))) / 2
+    output[:, [1, 3]] -= (input_dim - scaling_factor[:, 0:1] * im_dim_list[:, 0:1].reshape((-1, 1))) / 2
+    output[:, [2, 4]] -= (input_dim - scaling_factor[:, 1:2] * im_dim_list[:, 1:2].reshape((-1, 1))) / 2
     output[:, 1:5] /= scaling_factor
 
     for i in range(output.shape[0]):
@@ -137,23 +137,23 @@ def predict_video(net, ctx, video_file):
             img = nd.array(prep_image(frame, input_dim), ctx=ctx).expand_dims(0)
             # cv2.imshow("a", frame)
 
-            prediction = predict_transform(net(img), anchors)
+            prediction = predict_transform(net(img), input_dim, anchors)
             prediction = write_results(prediction, num_classes, confidence=confidence, nms_conf=nms_thresh)
-            prediction = prediction.asnumpy()
+
             if type(prediction) == int:
                 frames += 1
                 print("FPS of the video is {:5.4f}".format(frames / (time.time() - start)))
                 result_video.write(frame)
-                cv2.imshow("frame", frame)
-                key = cv2.waitKey(1)
-                if key & 0xFF == ord('q'):
-                    break
+                # cv2.imshow("frame", frame)
+                # key = cv2.waitKey(1)
+                # if key & 0xFF == ord('q'):
+                #     break
                 continue
             # output[:, 1:5] = torch.clamp(output[:, 1:5], 0.0, float(input_dim))
 
             # im_dim = im_dim.repeat(output.size(0), 1) / input_dim
             # output[:, 1:5] *= im_dim
-
+            prediction = prediction.asnumpy()
             scaling_factor = min(input_dim / frame.shape[0], input_dim / frame.shape[1])
             # scaling_factor = (416 / im_dim_list)[0].view(-1, 1)
 
@@ -192,6 +192,7 @@ if __name__ == '__main__':
     batch_size = args.batch_size
     confidence = args.confidence
     nms_thresh = args.nms_thresh
+    input_dim = args.input_dim
     dst_dir = args.dst_dir
     start = 0
     # classes = load_classes("data/coco.names")
@@ -199,7 +200,7 @@ if __name__ == '__main__':
 
     ctx = try_gpu(args.gpu)
     num_classes = len(classes)
-    net = DarkNet(num_classes=num_classes)
+    net = DarkNet(input_dim=input_dim, num_classes=num_classes)
     net.initialize(ctx=ctx)
     input_dim = args.input_dim
 
@@ -215,10 +216,10 @@ if __name__ == '__main__':
 
     tmp_batch = nd.uniform(shape=(1, 3, args.input_dim, args.input_dim), ctx=ctx)
     net(tmp_batch)
-    if args.params:
+    if args.params or num_classes != 80:
         net.load_params(args.params)
     else:
-        net.load_weights("./data/yolov3.weights")
+        net.load_weights("./data/yolov3.weights", fine_tune=True)
 
     if args.video:
         predict_video(net, ctx=ctx, video_file=args.video)
@@ -234,18 +235,17 @@ if __name__ == '__main__':
     num_batches = len(imlist) // batch_size + leftover
     im_batches = [imlist[i * batch_size: min((i + 1) * batch_size, len(imlist))]
                   for i in range(num_batches)]
-    write = 0
 
     start_det_loop = time.time()
     anchors = np.array([(10, 13), (16, 30), (33, 23), (30, 61), (62, 45),
                        (59, 119), (116, 90), (156, 198), (373, 326)])
+    output = None
     for i, batch in enumerate(im_batches):
-        # load the image
         load_images = [cv2.imread(img) for img in batch]
         tmp_batch = list(map(prep_image, load_images, [input_dim for x in range(len(batch))]))
-        batch = nd.array(tmp_batch, ctx=ctx)
+        tmp_batch = nd.array(tmp_batch, ctx=ctx)
         start = time.time()
-        prediction = predict_transform(net(batch), anchors)
+        prediction = predict_transform(net(tmp_batch), input_dim, anchors)
         # label = prep_label("./labels/2011_002987.txt", num_classes, ctx=prediction.context)
         # prediction, _ = prep_final_label(label.expand_dims(0), num_classes, ctx=prediction.context)
         prediction = write_results(prediction, num_classes, confidence=confidence, nms_conf=nms_thresh)
@@ -259,25 +259,19 @@ if __name__ == '__main__':
                 print("----------------------------------------------------------")
             continue
 
-        prediction[:, 0] += i * batch_size  # transform the atribute from index in batch to index in imlist
+        # prediction[:, 0] += i * batch_size  # transform the atribute from index in batch to index in imlist
 
-        if not write:  # If we have't initialised output
+        if output is None:  # If we have't initialised output
             output = prediction
-            write = 1
         else:
             output = nd.concat(output, prediction, dim=0)
 
-        for im_num, image in enumerate(imlist[i * batch_size: min((i + 1) * batch_size, len(imlist))]):
-            im_id = i * batch_size + im_num
-            objs = [classes[int(x.asnumpy()[-1])] for x in output if int(x.asnumpy()[0]) == im_id]
-            print("{0:20s} predicted in {1:6.3f} seconds".format(image.split("/")[-1], (end - start) / batch_size))
+        for image in batch:
+            print("{0:20s} predicted in {1:6.3f} seconds".format(image.split("/")[-1], (end - start) / len(batch)))
             print("----------------------------------------------------------")
 
-    try:
-        output
-        save_results(load_images, output)
-    except NameError:
-        print("No detections were made")
-        exit()
-    except Exception as e:
-        print(e)
+        if not output is None:
+            save_results(load_images, output, input_dim=input_dim)
+        else:
+            print("No detections were made")
+        output = None
