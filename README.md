@@ -2,8 +2,8 @@
 A yolov3 simple implementation in MXNet, based on version 1.2.0 and cuda 9.0(optional), python3.
 Works on Windows and Ubuntu 16.04.
 
-## Detect Performance is not good. And the Loss Function is for reference only. This project is still semi-finished, sorry.
-## Working......
+**Detect Performance is not good. And the Loss Function is for reference only. This project is still semi-finished, sorry.**
+**Working......**
 
 ## Table of Contents
 - [yolov3-mxnet](#yolov3-mxnet)
