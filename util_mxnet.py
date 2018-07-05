@@ -2,17 +2,23 @@ from __future__ import division
 import cv2
 import mxnet as mx
 import numpy as np
-from mxnet import nd
+from mxnet import nd, gluon
+import threading
+import xml.etree.ElementTree as ET
 
 
-def try_gpu(num):
+def try_gpu(num_list):
     """If GPU is available, return mx.gpu(0); else return mx.cpu()"""
-    try:
-        ctx = mx.gpu(num)
-        _ = nd.array([0], ctx=ctx)
-    except Exception as e:
-        print(e)
-        ctx = mx.cpu()
+    ctx = []
+    for num in num_list:
+        try:
+            tmp_ctx = mx.gpu(int(num))
+            _ = nd.array([0], ctx=tmp_ctx)
+            ctx.append(tmp_ctx)
+        except Exception as e:
+            print("gpu {}:".format(num), e)
+    if not ctx:
+        ctx.append(mx.cpu())
     return ctx
 
 
@@ -20,6 +26,8 @@ def bbox_iou(box1, box2, mode="xywh"):
     """
     Returns the IoU of two bounding boxes
     """
+    box1 = np.abs(box1)
+    box2 = np.abs(box2)
     if mode == "xywh":
         tmp_box1 = box1.copy()
         tmp_box1[:, 0] = box1[:, 0] - box1[:, 2] / 2.0
@@ -52,8 +60,8 @@ def bbox_iou(box1, box2, mode="xywh"):
     b1_area = (b1_x2 - b1_x1 + 1) * (b1_y2 - b1_y1 + 1)
     b2_area = (b2_x2 - b2_x1 + 1) * (b2_y2 - b2_y1 + 1)
     iou = inter_area / (b1_area + b2_area - inter_area)
-    iou[inter_area >= b1_area] = 0.8
-    iou[inter_area >= b2_area] = 0.8
+    # iou[inter_area >= b1_area] = 0.8
+    # iou[inter_area >= b2_area] = 0.8
     return iou
 
 
@@ -61,7 +69,7 @@ def train_transform(prediction, num_classes, stride):
     batch_size = prediction.shape[0]
     bbox_attrs = 5 + num_classes
 
-    prediction_1 = nd.transpose(prediction.reshape((batch_size, bbox_attrs * 3, stride * stride)), (0, 2, 1))\
+    prediction_1 = nd.transpose(prediction.reshape((batch_size, bbox_attrs * 3, stride * stride)), (0, 2, 1)) \
         .reshape(batch_size, stride * stride * 3, bbox_attrs)
 
     xy_pred = nd.sigmoid(prediction_1.slice_axis(begin=0, end=2, axis=-1))
@@ -73,8 +81,8 @@ def train_transform(prediction, num_classes, stride):
 
 
 def predict_transform(prediction, input_dim, anchors):
-    if not isinstance(anchors, nd.NDArray):
-        anchors = nd.array(anchors, ctx=prediction.context)
+    if not isinstance(anchors, np.ndarray):
+        anchors = np.array(anchors)
     batch_size = prediction.shape[0]
     anchors_masks = [[6, 7, 8], [3, 4, 5], [0, 1, 2]]
     strides = [13, 26, 52]
@@ -83,16 +91,37 @@ def predict_transform(prediction, input_dim, anchors):
         stride = strides[i]
         grid = np.arange(stride)
         a, b = np.meshgrid(grid, grid)
-        x_offset = nd.array(a.reshape((-1, 1)), ctx=prediction.context)
-        y_offset = nd.array(b.reshape((-1, 1)), ctx=prediction.context)
-        x_y_offset = nd.concat(x_offset, y_offset, dim=1).repeat(repeats=3, axis=0).reshape((-1, 2)).expand_dims(0)\
-            .repeat(repeats=batch_size, axis=0)
-        tmp_anchors = anchors[anchors_masks[i]].expand_dims(0).repeat(repeats=stride * stride, axis=0).reshape((-1, 2)) \
-            .expand_dims(0).repeat(repeats=batch_size, axis=0)
+        x_offset = np.array(a.reshape((-1, 1)))
+        y_offset = np.array(b.reshape((-1, 1)))
+        x_y_offset = \
+            np.repeat(
+                np.expand_dims(
+                    np.repeat(
+                        np.concatenate(
+                            (x_offset, y_offset), axis=1), repeats=3, axis=0
+                    ).reshape((-1, 2)),
+                    0
+                ),
+                repeats=batch_size, axis=0
+            )
+        tmp_anchors = \
+            np.repeat(
+                np.expand_dims(
+                    np.repeat(
+                        np.expand_dims(
+                            anchors[anchors_masks[i]], 0
+                        ),
+                        repeats=stride * stride, axis=0
+                    ).reshape((-1, 2)),
+                    axis=0
+                ),
+                repeats=batch_size, axis=0
+            )
 
         prediction[:, step[i][0]:step[i][1], :2] += x_y_offset
         prediction[:, step[i][0]:step[i][1], :2] *= (float(input_dim) / stride)
-        prediction[:, step[i][0]:step[i][1], 2:4] = nd.exp(prediction[:, step[i][0]:step[i][1], 2:4]) * tmp_anchors
+        prediction[:, step[i][0]:step[i][1], 2:4] = \
+            np.exp(np.clip(prediction[:, step[i][0]:step[i][1], 2:4], a_min=0., a_max=10)) * tmp_anchors
 
     return prediction
 
@@ -217,3 +246,200 @@ def split_and_load(data, ctx):
     n, k = data.shape[0], len(ctx)
     m = n // k
     return [data[i * m: (i + 1) * m].as_in_context(ctx[i]) for i in range(k)]
+
+
+class SigmoidBinaryCrossEntropyLoss(gluon.loss.Loss):
+    def __init__(self, from_sigmoid=False, weight=None, batch_axis=0, **kwargs):
+        super(SigmoidBinaryCrossEntropyLoss, self).__init__(weight, batch_axis, **kwargs)
+        self._from_sigmoid = from_sigmoid
+
+    def hybrid_forward(self, F, pred, label, sample_weight=None):
+        label = gluon.loss._reshape_like(F, label, pred)
+        if not self._from_sigmoid:
+            # We use the stable formula: max(x, 0) - x * z + log(1 + exp(-abs(x)))
+            tmp_loss = F.relu(pred) - pred * label + F.Activation(-F.abs(pred), act_type='softrelu')
+        else:
+            tmp_loss = -(F.log(pred + 1e-12) * label + F.log(1. - pred + 1e-12) * (1. - label))
+        tmp_loss = gluon.loss._apply_weighting(F, tmp_loss, self._weight, sample_weight)
+        return tmp_loss
+
+
+class L1Loss(gluon.loss.Loss):
+    def __init__(self, weight=None, batch_axis=0, **kwargs):
+        super(L1Loss, self).__init__(weight, batch_axis, **kwargs)
+
+    def hybrid_forward(self, F, pred, label, sample_weight=None):
+        label = gluon.loss._reshape_like(F, label, pred)
+        tmp_loss = F.abs(pred - label)
+        tmp_loss = gluon.loss._apply_weighting(F, tmp_loss, self._weight, sample_weight)
+        return tmp_loss
+
+
+class L2Loss(gluon.loss.Loss):
+    def __init__(self, weight=1., batch_axis=0, **kwargs):
+        super(L2Loss, self).__init__(weight, batch_axis, **kwargs)
+
+    def hybrid_forward(self, F, pred, label, sample_weight=None):
+        label = gluon.loss._reshape_like(F, label, pred)
+        tmp_loss = F.square(pred - label)
+        tmp_loss = gluon.loss._apply_weighting(F, tmp_loss, self._weight / 2, sample_weight)
+        return tmp_loss
+
+
+class FocalLoss(gluon.loss.Loss):
+    def __init__(self, weight=1, batch_axis=0, gamma=2, eps=1e-7, alpha=0.25, with_ce=False):
+        super(FocalLoss, self).__init__(weight=weight, batch_axis=batch_axis)
+        self.gamma = gamma
+        self.eps = eps
+        self.with_ce = with_ce
+        self.alpha = alpha
+
+    def hybrid_forward(self, F, pred, label, sample_weight=None):
+        if self.alpha > 0.:
+            alpha_t = F.abs(self.alpha + (label == 1.).astype("float32") - 1.)
+        else:
+            alpha_t = 1.
+        if self.with_ce:
+            sce_loss = SigmoidBinaryCrossEntropyLoss()
+            p_t = sce_loss(pred, label)
+            tmp_loss = -(alpha_t * F.power(1 - p_t, self.gamma) * p_t)
+        else:
+            p_t = F.abs(pred + label - 1.)
+            tmp_loss = -(alpha_t * F.power(1 - p_t, self.gamma) * F.log(p_t))
+        tmp_loss = gluon.loss._apply_weighting(F, tmp_loss, self._weight, sample_weight)
+        return tmp_loss
+
+
+class LossRecorder(mx.metric.EvalMetric):
+    """LossRecorder is used to record raw loss so we can observe loss directly
+    """
+
+    def __init__(self, name):
+        super(LossRecorder, self).__init__(name)
+
+    def update(self, labels, preds=0):
+        """Update metric with pure loss
+        """
+        for loss in labels:
+            if isinstance(loss, mx.nd.NDArray):
+                loss = loss.asnumpy()
+            self.sum_metric += loss.sum()
+            self.num_inst += 1
+
+
+class MyThread(threading.Thread):
+    def __init__(self, func, args=()):
+        super(MyThread, self).__init__()
+        self.func = func
+        self.args = args
+
+    def run(self):
+        self.result = self.func(*self.args)
+
+    def get_result(self):
+        try:
+            return self.result  # 如果子线程不使用join方法，此处可能会报没有self.result的错误
+        except Exception as e:
+            print(e)
+            return None
+
+
+def parse_xml(xml_file, classes):
+    root = ET.parse(xml_file).getroot()
+    image_size = root.find("size")
+    size = {
+        "width": float(image_size.find("width").text),
+        "height": float(image_size.find("height").text),
+        "depth": float(image_size.find("depth").text)
+    }
+    bbox = []
+    if not isinstance(classes, np.ndarray):
+        classes = np.array(classes)
+    for obj in root.findall("object"):
+        cls = np.argwhere(classes == obj.find("name").text).reshape(-1)[0]
+        bndbox = obj.find("bndbox")
+        xmin = float(bndbox.find("xmin").text)
+        ymin = float(bndbox.find("ymin").text)
+        xmax = float(bndbox.find("xmax").text)
+        ymax = float(bndbox.find("ymax").text)
+        center_x = (xmin + xmax) / 2.0 / size["width"]
+        center_y = (ymin + ymax) / 2.0 / size["height"]
+        width = (xmax - xmin) / size["width"]
+        height = (ymax - ymin) / size["height"]
+        bbox.append([cls, center_x, center_y, width, height])
+    return np.array(bbox)
+
+
+def prep_label(label_file, classes):
+    num_classes = len(classes)
+    if isinstance(label_file, list):
+        labels = label_file
+    elif label_file.endswith(".txt"):
+        with open(label_file, "r") as file:
+            labels = file.readlines()
+            labels = np.array([list(map(float, x.split())) for x in labels], dtype="float32")
+    elif label_file.endswith(".xml"):
+        labels = parse_xml(label_file, classes)
+    final_labels = nd.zeros(shape=(30, num_classes + 5), dtype="float32")
+    i = 0
+    for label in labels:
+        one_hot = np.zeros(shape=(num_classes + 5), dtype="float32")
+        one_hot[5 + int(label[0])] = 1.0
+        one_hot[4] = 1.0
+        one_hot[:4] = label[1:]
+        final_labels[i] = one_hot
+        i += 1
+        i %= 30
+    return nd.array(final_labels)
+
+
+def prep_final_label(labels, num_classes, input_dim=416):
+    ctx = labels.context
+    if isinstance(labels, nd.NDArray):
+        labels = labels.asnumpy()
+    anchors = np.array([(10, 13), (16, 30), (33, 23), (30, 61), (62, 45),
+                        (59, 119), (116, 90), (156, 198), (373, 326)])
+    anchors_mask = [[6, 7, 8], [3, 4, 5], [0, 1, 2]]
+    batch_size = labels.shape[0]
+    label_1 = np.zeros(shape=(batch_size, 13, 13, 3, num_classes + 5), dtype="float32")
+    label_2 = np.zeros(shape=(batch_size, 26, 26, 3, num_classes + 5), dtype="float32")
+    label_3 = np.zeros(shape=(batch_size, 52, 52, 3, num_classes + 5), dtype="float32")
+
+    true_label_1 = np.zeros(shape=(batch_size, 13, 13, 3, 5), dtype="float32")
+    true_label_2 = np.zeros(shape=(batch_size, 26, 26, 3, 5), dtype="float32")
+    true_label_3 = np.zeros(shape=(batch_size, 52, 52, 3, 5), dtype="float32")
+    label_list = [label_1, label_2, label_3]
+    true_label_list = [true_label_1, true_label_2, true_label_3]
+    for x_box in range(labels.shape[0]):
+        for y_box in range(labels.shape[1]):
+            if labels[x_box, y_box, 4] == 0.0:
+                break
+            for i in range(3):
+                stride = np.power(2, i) * 13
+                tmp_anchors = anchors[anchors_mask[i]]
+                tmp_xywh = np.repeat(np.expand_dims(labels[x_box, y_box, :4] * stride, axis=0),
+                                     repeats=tmp_anchors.shape[0], axis=0)
+                anchor_xywh = tmp_xywh.copy()
+                anchor_xywh[:, 2:4] = tmp_anchors / input_dim * stride
+                best_anchor = np.argmax(bbox_iou(tmp_xywh, anchor_xywh), axis=0)
+                label = labels[x_box, y_box].copy()
+                tmp_idx = (label[:2] * stride).astype("int")
+                label[:2] = label[:2] * stride
+                label[:2] -= tmp_idx
+                label[2:4] = np.log(label[2:4] * input_dim / tmp_anchors[best_anchor] + 1e-16)
+
+                label_list[i][x_box, tmp_idx[1], tmp_idx[0], best_anchor] = label
+
+                true_xywhs = labels[x_box, y_box, :5] * input_dim
+                true_xywhs[4] = 1.0
+                true_label_list[i][x_box, tmp_idx[1], tmp_idx[0], best_anchor] = true_xywhs
+    t_y = nd.concat(nd.array(label_1.reshape((batch_size, -1, num_classes + 5)), ctx=ctx),
+                    nd.array(label_2.reshape((batch_size, -1, num_classes + 5)), ctx=ctx),
+                    nd.array(label_3.reshape((batch_size, -1, num_classes + 5)), ctx=ctx),
+                    dim=1)
+    t_xywhs = nd.concat(nd.array(true_label_1.reshape((batch_size, -1, 5)), ctx=ctx),
+                        nd.array(true_label_2.reshape((batch_size, -1, 5)), ctx=ctx),
+                        nd.array(true_label_3.reshape((batch_size, -1, 5)), ctx=ctx),
+                        dim=1)
+
+    return t_y, t_xywhs

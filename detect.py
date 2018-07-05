@@ -198,7 +198,7 @@ if __name__ == '__main__':
     # classes = load_classes("data/coco.names")
     classes = load_classes(args.classes)
 
-    ctx = try_gpu(args.gpu)
+    ctx = try_gpu(args.gpu)[0]
     num_classes = len(classes)
     net = DarkNet(input_dim=input_dim, num_classes=num_classes)
     net.initialize(ctx=ctx)
@@ -216,10 +216,10 @@ if __name__ == '__main__':
 
     tmp_batch = nd.uniform(shape=(1, 3, args.input_dim, args.input_dim), ctx=ctx)
     net(tmp_batch)
-    if args.params or num_classes != 80:
+    if args.params:
         net.load_params(args.params)
     else:
-        net.load_weights("./data/yolov3.weights", fine_tune=True)
+        net.load_weights("./data/yolov3.weights", fine_tune=False)
 
     if args.video:
         predict_video(net, ctx=ctx, video_file=args.video)
@@ -246,8 +246,10 @@ if __name__ == '__main__':
         tmp_batch = nd.array(tmp_batch, ctx=ctx)
         start = time.time()
         prediction = predict_transform(net(tmp_batch), input_dim, anchors)
-        # label = prep_label("./labels/2011_002987.txt", num_classes, ctx=prediction.context)
-        # prediction, _ = prep_final_label(label.expand_dims(0), num_classes, ctx=prediction.context)
+        # from train import prep_label
+        # label = prep_label("./data/000283.txt", num_classes, ctx=prediction.context)
+        # prediction, _ = prep_final_label(label.expand_dims(0), num_classes, ctx=prediction.context, input_dim=input_dim)
+        # prediction = predict_transform(prediction, input_dim, anchors)
         prediction = write_results(prediction, num_classes, confidence=confidence, nms_conf=nms_thresh)
 
         end = time.time()

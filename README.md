@@ -2,6 +2,9 @@
 A yolov3 simple implementation in MXNet, based on version 1.2.0 and cuda 9.0(optional), python3.
 Works on Windows and Ubuntu 16.04.
 
+## Detect Performance is not good. And the Loss Function is for reference only. This project is still semi-finished, sorry.
+## Working......
+
 ## Table of Contents
 - [yolov3-mxnet](#yolov3-mxnet)
   * [Paper](#paper)
@@ -46,14 +49,15 @@ or you can detect a video file, this need your opencv is compiled with ffmpeg.
 
 you will get result.avi in ./results
 
-## Train
-The IMAGE_FOLDER should contains two directorys, "train" and "train_label", label should be xml file like VOC's format.
+## Train (for reference only)
+The IMAGE_FOLDER should contains two directorys, "train" and "train_label", (or four, "train", "train_label", "val", "val_label") label should be xml file like VOC's format.
+PS: You can use voc_label.py in https://pjreddie.com/darknet/yolo/ to get train.txt and val.txt, set path to --train and --val instead of --images.
 ```
-    train.py [-h] [--epochs EPOCHS] [--images IMAGE_FOLDER]
+    train.py [-h] [--epochs EPOCHS] [--images IMAGES FOLDER]
                 [--batch_size BATCH_SIZE]
                 [--params WEIGHTS_PATH] [--classes CLASS_PATH]
                 [--confidence CONF_THRES] [--nms_thresh NMS_THRES]
-                [--gpu GPU ID]
+                [--gpu GPU ID] [--prefix PARAMS FILE NAME PREFIX]
 ```
 
 ## Credit
