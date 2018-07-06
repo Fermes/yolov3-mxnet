@@ -2,8 +2,8 @@
 A yolov3 simple implementation in MXNet, based on version 1.2.0 and cuda 9.0(optional), python3.
 Works on Windows and Ubuntu 16.04.
 
-**Detect Part Completed.
-Train Part is still semi-finished, sorry.
+**Detect Part Completed.<br>
+Train Part is still semi-finished, sorry.<br>
 Working......**
 
 ## Table of Contents
