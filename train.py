@@ -4,8 +4,8 @@ import re
 import time
 from random import shuffle
 from mxnet import autograd
-from darknet_mxnet import DarkNet
-from util_mxnet import *
+from darknet import DarkNet
+from utils import *
 
 
 def arg_parse():
@@ -37,17 +37,18 @@ def arg_parse():
     return parser.parse_args()
 
 
-def calculate_ignore(prediction, true_xywhs):
+def calculate_ignore(prediction, t_y, true_xywhs):
     if isinstance(true_xywhs, nd.NDArray):
         true_xywhs = true_xywhs.asnumpy()
-    prediction = predict_transform(prediction, input_dim, anchors)
+    tmp_pred = predict_transform(prediction, input_dim, anchors)
     ignore_mask = np.ones(shape=pred_score.shape, dtype="float32")
     item_index = np.argwhere(true_xywhs[:, :, 4] == 1.0)
 
     for x_box, y_box in item_index:
-        iou = bbox_iou(prediction[x_box, y_box:y_box + 1, :4], true_xywhs[x_box, y_box:y_box + 1]) < 0.7
-        ignore_mask[x_box, y_box:y_box + 1] = iou.astype("float32").reshape((-1, 1))
-    return ignore_mask
+        iou = bbox_iou(tmp_pred[x_box, y_box:y_box + 1, :4], true_xywhs[x_box, y_box:y_box + 1])
+        ignore_mask[x_box, y_box, 4:5] = (iou < 0.7).astype("float32").reshape((-1, 1))
+        t_y[x_box, y_box, 4:5] = nd.clip(nd.array(iou, ctx=t_y.context).reshape(-1), 1e-7, 1. - 1e-7)
+    return nd.array(ignore_mask, ctx=prediction.context)
 
 
 class YoloDataSet(gluon.data.Dataset):
@@ -134,7 +135,8 @@ if __name__ == '__main__':
     negative_weight = 1.0
 
     sce_loss = SigmoidBinaryCrossEntropyLoss(from_sigmoid=True)
-    focal_loss = FocalLoss()
+    focal_loss = FocalLoss(gamma=2, alpha=0.25)
+    huber_loss = HuberLoss()
     l1_loss = L1Loss()
     l2_loss = L2Loss()
 
@@ -162,27 +164,29 @@ if __name__ == '__main__':
     early_stop = 0
 
     for epoch in range(args.epoch):
-        if early_stop >= 5:
+        if early_stop == 5:
             print("train stop, epoch: {0}  best loss: {1:.3f}".format(epoch - 5, best_loss))
             break
+        print('Epoch {} / {}'.format(epoch, args.epoch - 1))
+        print('-' * 20)
+
         tic = time.time()
         for mode in ["train", "val"]:
-            cls_loss.reset()
-            obj_loss.reset()
-            box_loss.reset()
             if mode == "val":
                 if not args.val_data_path:
-                    continue
+                    break
                 total_steps = int(np.ceil(len(val_dataset) / batch_size) - 1)
             else:
                 total_steps = int(np.ceil(len(train_dataset) / batch_size) - 1)
-
+            cls_loss.reset()
+            obj_loss.reset()
+            box_loss.reset()
             for i, batch in enumerate(dataloaders[mode]):
                 gpu_Xs = split_and_load(batch[0], ctx)
                 gpu_ys = split_and_load(batch[1], ctx)
-
-                loss_list = []
                 with autograd.record(mode == "train"):
+                    loss_list = []
+                    batch_num = 0
                     for gpu_x, gpu_y in zip(gpu_Xs, gpu_ys):
                         prediction = net(gpu_x)
                         pred_xy = prediction[:, :, :2]
@@ -191,57 +195,55 @@ if __name__ == '__main__':
                         pred_cls = prediction[:, :, 5:]
                         with autograd.pause():
                             t_y, true_xywhs = prep_final_label(gpu_y, num_classes, input_dim)
-                            ignore_mask = calculate_ignore(prediction.copy().asnumpy(), true_xywhs.asnumpy())
+                            ignore_mask = calculate_ignore(prediction.copy(), t_y, true_xywhs)
 
                             true_box = t_y[:, :, :4]
                             true_score = t_y[:, :, 4:5]
                             true_cls = t_y[:, :, 5:]
+                            conf_weight = nd.array(conf_weight, ctx=prediction.context)
                             coordinate_weight = true_score.copy()
                             score_weight = nd.where(coordinate_weight == 1.0,
                                                     nd.ones_like(coordinate_weight) * positive_weight,
                                                     nd.ones_like(coordinate_weight) * negative_weight)
                             box_loss_scale = 2. - true_xywhs[:, :, 2:3] * true_xywhs[:, :, 3:4] / float(args.input_dim ** 2)
+                            box_loss_scale = nd.array(box_loss_scale, ctx=prediction.context)
 
-                        ignore_mask = nd.array(ignore_mask, ctx=pred_xy.context)
-                        loss_xy = sce_loss(pred_xy, true_box.slice_axis(begin=0, end=2, axis=-1),
+                        loss_xy = huber_loss(pred_xy, true_box.slice_axis(begin=0, end=2, axis=-1),
                                            ignore_mask * coordinate_weight * box_loss_scale)
-                        loss_wh = l1_loss(pred_wh, true_box.slice_axis(begin=2, end=4, axis=-1),
+                        loss_wh = huber_loss(pred_wh, true_box.slice_axis(begin=2, end=4, axis=-1),
                                           ignore_mask * coordinate_weight * 0.5 * box_loss_scale)
                         # loss_conf = sce_loss(pred_score, true_score, score_weight)
-                        loss_conf = focal_loss(pred_score, true_score)
+                        loss_conf = huber_loss(pred_score, true_score)
 
-                        loss_cls = sce_loss(pred_cls, true_cls, coordinate_weight)
+                        loss_cls = focal_loss(pred_cls, true_cls, coordinate_weight)
 
                         value_num = nd.sum(coordinate_weight, axis=(1, 2))
                         total_num = nd.sum(coordinate_weight)
 
-                        t_loss_xy = nd.sum(loss_xy, axis=(1, 2)) / value_num / 2
-                        t_loss_wh = nd.sum(loss_wh, axis=(1, 2)) / value_num / 2
+                        t_loss_xy = nd.sum(loss_xy, axis=(1, 2)) / value_num
+                        t_loss_wh = nd.sum(loss_wh, axis=(1, 2)) / value_num
 
                         one_loss_conf = loss_conf * coordinate_weight
+                        one_num_conf = nd.sum(one_loss_conf != 0., axis=(1, 2))
                         zero_loss_conf = loss_conf * (1. - coordinate_weight)
+                        zero_num_conf = nd.sum(zero_loss_conf, axis=(1, 2))
 
-                        zero_num_conf = nd.sum(zero_loss_conf != 0., axis=(1, 2))
-                        t_loss_conf = nd.sum(one_loss_conf, axis=(1, 2)) / value_num + \
+                        t_loss_conf = nd.sum(one_loss_conf, axis=(1, 2)) / one_num_conf + \
                                       nd.sum(zero_loss_conf, axis=(1, 2)) / zero_num_conf
 
-                        one_loss_cls = loss_cls * true_cls
-                        one_num_cls = nd.sum(true_cls, axis=(1, 2))
-                        zero_loss_cls = loss_cls * (1. - true_cls) * coordinate_weight
-                        zero_num_cls = nd.sum((1. - true_cls) * coordinate_weight, axis=(1, 2))
-                        t_loss_cls = nd.sum(one_loss_cls, axis=(1, 2)) / one_num_cls + \
-                                     nd.sum(zero_loss_cls, axis=(1, 2)) / zero_num_cls
+                        t_loss_cls = nd.sum(loss_cls, axis=(1, 2)) / value_num
 
                         loss = t_loss_xy + t_loss_wh + t_loss_conf + t_loss_cls
+                        batch_num += len(loss)
                         loss_list.append(loss)
                         cls_loss.update(t_loss_cls)
                         obj_loss.update(t_loss_conf)
                         box_loss.update(t_loss_xy + t_loss_wh)
 
-                    if mode == "train":
-                        for loss in loss_list:
-                            loss.backward()
-                        trainer.step(batch_size)
+                if mode == "train":
+                    for l in loss_list:
+                        l.backward()
+                trainer.step(batch_num, ignore_stale_grad=True)
 
                 if (i + 1) % int(total_steps / 10) == 0:
                     mean_loss = 0.
@@ -250,20 +252,18 @@ if __name__ == '__main__':
                     mean_loss /= len(loss_list)
                     print("{0}  epoch: {1}  batch: {2} / {3}  loss: {4:.3f}"
                           .format(mode, epoch, i, total_steps, mean_loss))
-                if i == total_steps:
+                if (i + 1) % (total_steps / 3) == 0:
                     item_index = np.nonzero(true_score.asnumpy())
                     print("predict case / right case: {}".format((nd.sum(pred_score > 0.5) / total_num).asscalar()))
                     print((nd.sum(nd.abs(pred_score * coordinate_weight - true_score)) / total_num).asscalar())
-                    print(nd.sum(nd.abs(pred_wh * coordinate_weight - t_y[:, :, 2:4]))
-                          / 2 / total_num)
             nd.waitall()
             print('Epoch %2d, %s %s %.5f, %s %.5f, %s %.5f time %.1f sec' % (
                   epoch, mode, *cls_loss.get(), *obj_loss.get(), *box_loss.get(), time.time() - tic))
-            loss = cls_loss.get()[1] + obj_loss.get()[1] + box_loss.get()[1]
-            if mode == "val" or (not args.val_data_path and mode == "train"):
-                if loss < best_loss:
-                    early_stop = 0
-                    best_loss = loss
-                    net.save_params("./models/{0}_yolov3_mxnet.params".format(args.prefix))
-                else:
-                    early_stop += 1
+        tmp_loss = cls_loss.get()[1] + obj_loss.get()[1] + box_loss.get()[1]
+
+        if tmp_loss < best_loss:
+            early_stop = 0
+            best_loss = tmp_loss
+            net.save_params("./models/{0}_yolov3_mxnet.params".format(args.prefix))
+        else:
+            early_stop += 1

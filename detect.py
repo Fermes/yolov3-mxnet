@@ -1,8 +1,8 @@
 import os
 import time
 import argparse
-from util_mxnet import *
-from darknet_mxnet import DarkNet
+from utils import *
+from darknet import DarkNet
 
 image_name = 0
 
@@ -15,7 +15,7 @@ def arg_parse():
     parser.add_argument("--video", dest='video', help=
     "video file path", type=str)
     parser.add_argument("--classes", dest="classes", default="data/coco.names", type=str)
-    parser.add_argument("--gpu", dest="gpu", help="gpu id", default=0, type=int)
+    parser.add_argument("--gpu", dest="gpu", help="gpu id", default="0", type=str)
     parser.add_argument("--dst_dir", dest='dst_dir', help=
     "Image / Directory to store detections to",
                         default="results", type=str)
@@ -115,8 +115,6 @@ def predict_video(net, ctx, video_file):
 
     assert cap.isOpened(), 'Cannot capture source'
 
-    frames = 0
-    start = time.time()
     result_video = cv2.VideoWriter(
         os.path.join(dst_dir, "result.avi"),
         cv2.VideoWriter_fourcc("X", "2", "6", "4"),
@@ -125,37 +123,28 @@ def predict_video(net, ctx, video_file):
     )
     anchors = np.array([(10, 13), (16, 30), (33, 23), (30, 61), (62, 45),
                        (59, 119), (116, 90), (156, 198), (373, 326)])
-    cost_time = 0
+    detect_start = time.time()
+    frame_num = 0
     while cap.isOpened():
+
         ret, frame = cap.read()
         if ret:
-            cost_start = time.time()
-            frames += 1
-            # if frames % 2 != 0:
-            #     continue
-            # frame = cv2.resize(frame, (1280, 720))
+            frame_num += 1
             img = nd.array(prep_image(frame, input_dim), ctx=ctx).expand_dims(0)
-            # cv2.imshow("a", frame)
 
             prediction = predict_transform(net(img), input_dim, anchors)
-            prediction = write_results(prediction, num_classes, confidence=confidence, nms_conf=nms_thresh)
+            prediction = write_results(prediction, num_classes, confidence=confidence, nms_conf=nms_thresh).asnumpy()
 
             if type(prediction) == int:
-                frames += 1
-                print("FPS of the video is {:5.4f}".format(frames / (time.time() - start)))
+                frame_num += 1
+                print("FPS of the video is {:5.3f}".format(frame_num / (time.time() - detect_start)))
                 result_video.write(frame)
                 # cv2.imshow("frame", frame)
                 # key = cv2.waitKey(1)
                 # if key & 0xFF == ord('q'):
                 #     break
                 continue
-            # output[:, 1:5] = torch.clamp(output[:, 1:5], 0.0, float(input_dim))
-
-            # im_dim = im_dim.repeat(output.size(0), 1) / input_dim
-            # output[:, 1:5] *= im_dim
-            prediction = prediction.asnumpy()
             scaling_factor = min(input_dim / frame.shape[0], input_dim / frame.shape[1])
-            # scaling_factor = (416 / im_dim_list)[0].view(-1, 1)
 
             prediction[:, [1, 3]] -= (input_dim - scaling_factor * frame.shape[1]) / 2
             prediction[:, [2, 4]] -= (input_dim - scaling_factor * frame.shape[0]) / 2
@@ -164,21 +153,22 @@ def predict_video(net, ctx, video_file):
             for i in range(prediction.shape[0]):
                 prediction[i, [1, 3]] = np.clip(prediction[i, [1, 3]], 0.0, frame.shape[1])
                 prediction[i, [2, 4]] = np.clip(prediction[i, [2, 4]], 0.0, frame.shape[0])
+
             draw_bbox(frame, prediction)
 
-            cost_time += time.time() - cost_start
             result_video.write(frame)
 
             # cv2.imshow("frame", frame)
             # key = cv2.waitKey(1000)
             # if key & 0xFF == ord('q'):
             #     break
-            # frames += 1
             # print(time.time() - start)
-            if frames % 37 == 0:
-                print("FPS of the video is {:5.2f}\n Per Image Cost Time{:5.2f}".format(frames / (time.time() - start),
-                                                                                        cost_time / 37))
-                cost_time = 0
+            if frame_num % 100 == 0:
+                t = time.time() - detect_start
+                print("FPS of the video is {:5.2f}\n Per Image Cost Time{:5.3f}".format(100 / t,
+                                                                                        t / 100))
+                detect_start = time.time()
+
         else:
             print("video source closed")
             break
@@ -198,6 +188,7 @@ if __name__ == '__main__':
     # classes = load_classes("data/coco.names")
     classes = load_classes(args.classes)
 
+    gpu = [int(x) for x in args.gpu.replace(" ", "").split(",")]
     ctx = try_gpu(args.gpu)[0]
     num_classes = len(classes)
     net = DarkNet(input_dim=input_dim, num_classes=num_classes)
@@ -246,10 +237,6 @@ if __name__ == '__main__':
         tmp_batch = nd.array(tmp_batch, ctx=ctx)
         start = time.time()
         prediction = predict_transform(net(tmp_batch), input_dim, anchors)
-        # from train import prep_label
-        # label = prep_label("./data/000283.txt", num_classes, ctx=prediction.context)
-        # prediction, _ = prep_final_label(label.expand_dims(0), num_classes, ctx=prediction.context, input_dim=input_dim)
-        # prediction = predict_transform(prediction, input_dim, anchors)
         prediction = write_results(prediction, num_classes, confidence=confidence, nms_conf=nms_thresh)
 
         end = time.time()

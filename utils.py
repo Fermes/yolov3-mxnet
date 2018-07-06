@@ -62,7 +62,7 @@ def bbox_iou(box1, box2, mode="xywh"):
     iou = inter_area / (b1_area + b2_area - inter_area)
     # iou[inter_area >= b1_area] = 0.8
     # iou[inter_area >= b2_area] = 0.8
-    return iou
+    return np.clip(iou, 1e-5, 1. - 1e-5)
 
 
 def train_transform(prediction, num_classes, stride):
@@ -229,7 +229,7 @@ def prep_image(img, inp_dim):
     Returns a Variable
     """
     img = (letterbox_image(img, (inp_dim, inp_dim)))
-    img = np.array(img.transpose((2, 0, 1))).astype("float32")
+    img = np.transpose(img[:, :, ::-1], (2, 0, 1)).astype("float32")
     img /= 255.0
     return img
 
