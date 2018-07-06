@@ -84,11 +84,11 @@ def save_results(load_images, output, input_dim):
     im_dim_list = nd.tile(im_dim_list, 2)
     im_dim_list = im_dim_list[output[:, 0], :]
 
-    scaling_factor = input_dim / im_dim_list
+    scaling_factor = nd.min(input_dim / im_dim_list, axis=1).reshape((-1, 1))
     # scaling_factor = (416 / im_dim_list)[0].view(-1, 1)
 
-    output[:, [1, 3]] -= (input_dim - scaling_factor[:, 0:1] * im_dim_list[:, 0:1].reshape((-1, 1))) / 2
-    output[:, [2, 4]] -= (input_dim - scaling_factor[:, 1:2] * im_dim_list[:, 1:2].reshape((-1, 1))) / 2
+    output[:, [1, 3]] -= (input_dim - scaling_factor * im_dim_list[:, 0:1].reshape((-1, 1))) / 2
+    output[:, [2, 4]] -= (input_dim - scaling_factor * im_dim_list[:, 1:2].reshape((-1, 1))) / 2
     output[:, 1:5] /= scaling_factor
 
     for i in range(output.shape[0]):
