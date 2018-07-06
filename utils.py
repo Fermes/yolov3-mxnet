@@ -447,8 +447,7 @@ def prep_final_label(labels, num_classes, input_dim=416):
                 true_xywhs = labels[x_box, y_box, :5] * input_dim
                 true_xywhs[4] = 1.0
                 true_label_list[i][x_box, tmp_idx[1], tmp_idx[0], best_anchor] = true_xywhs
-
-                conf_weight_list[i][x_box, tmp_idx[1], tmp_idx[0]] = np.ones((3, 1))
+                
     t_y = nd.concat(nd.array(label_1.reshape((batch_size, -1, num_classes + 5)), ctx=ctx),
                     nd.array(label_2.reshape((batch_size, -1, num_classes + 5)), ctx=ctx),
                     nd.array(label_3.reshape((batch_size, -1, num_classes + 5)), ctx=ctx),
