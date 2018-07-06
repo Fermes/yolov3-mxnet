@@ -2,9 +2,9 @@
 A yolov3 simple implementation in MXNet, based on version 1.2.0 and cuda 9.0(optional), python3.
 Works on Windows and Ubuntu 16.04.
 
-**Detect Part Completed. **
-**Train Part is still semi-finished, sorry.**
-**Working......**
+**Detect Part Completed.
+Train Part is still semi-finished, sorry.
+Working......**
 
 ## Table of Contents
 - [yolov3-mxnet](#yolov3-mxnet)
@@ -38,7 +38,7 @@ https://pjreddie.com/yolo/.
     $ cd PyTorch-YOLOv3/
     $ sudo pip3 install opencv-python mxnet-cu90==1.2.0
 
-##### Detection
+## Detection
 put your images in ./images, and
 
     $ python detect.py [--gpu GPU ID]
