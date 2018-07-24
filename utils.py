@@ -22,13 +22,13 @@ def try_gpu(num_list):
     return ctx
 
 
-def bbox_iou(box1, box2, mode="xywh"):
+def bbox_iou(box1, box2, transform=True):
     """
     Returns the IoU of two bounding boxes
     """
-    box1 = np.abs(box1)
-    box2 = np.abs(box2)
-    if mode == "xywh":
+    box1 = nd.abs(box1)
+    box2 = nd.abs(box2)
+    if transform:
         tmp_box1 = box1.copy()
         tmp_box1[:, 0] = box1[:, 0] - box1[:, 2] / 2.0
         tmp_box1[:, 1] = box1[:, 1] - box1[:, 3] / 2.0
@@ -46,15 +46,14 @@ def bbox_iou(box1, box2, mode="xywh"):
     b2_x1, b2_y1, b2_x2, b2_y2 = box2[:, 0], box2[:, 1], box2[:, 2], box2[:, 3]
 
     # get the corrdinates of the intersection rectangle
-    inter_rect_x1 = np.where(b1_x1 > b2_x1, b1_x1, b2_x1)
-    inter_rect_y1 = np.where(b1_y1 > b2_y1, b1_y1, b2_y1)
-    inter_rect_x2 = np.where(b1_x2 < b2_x2, b1_x2, b2_x2)
-    inter_rect_y2 = np.where(b1_y2 < b2_y2, b1_y2, b2_y2)
+    inter_rect_x1 = nd.where(b1_x1 > b2_x1, b1_x1, b2_x1)
+    inter_rect_y1 = nd.where(b1_y1 > b2_y1, b1_y1, b2_y1)
+    inter_rect_x2 = nd.where(b1_x2 < b2_x2, b1_x2, b2_x2)
+    inter_rect_y2 = nd.where(b1_y2 < b2_y2, b1_y2, b2_y2)
 
     # Intersection area
-    inter_area = np.clip(inter_rect_x2 - inter_rect_x1 + 1, a_min=0, a_max=None) * np.clip(
-        inter_rect_y2 - inter_rect_y1 + 1,
-        a_min=0, a_max=None)
+    inter_area = nd.clip(inter_rect_x2 - inter_rect_x1 + 1, a_min=0, a_max=10000) * nd.clip(
+        inter_rect_y2 - inter_rect_y1 + 1, a_min=0, a_max=10000)
 
     # Union Area
     b1_area = (b1_x2 - b1_x1 + 1) * (b1_y2 - b1_y1 + 1)
@@ -62,27 +61,14 @@ def bbox_iou(box1, box2, mode="xywh"):
     iou = inter_area / (b1_area + b2_area - inter_area)
     # iou[inter_area >= b1_area] = 0.8
     # iou[inter_area >= b2_area] = 0.8
-    return np.clip(iou, 1e-5, 1. - 1e-5)
-
-
-def train_transform(prediction, num_classes, stride):
-    batch_size = prediction.shape[0]
-    bbox_attrs = 5 + num_classes
-
-    prediction_1 = nd.transpose(prediction.reshape((batch_size, bbox_attrs * 3, stride * stride)), (0, 2, 1)) \
-        .reshape(batch_size, stride * stride * 3, bbox_attrs)
-
-    xy_pred = nd.sigmoid(prediction_1.slice_axis(begin=0, end=2, axis=-1))
-    wh_pred = prediction_1.slice_axis(begin=2, end=4, axis=-1)
-    score_pred = nd.sigmoid(prediction_1.slice_axis(begin=4, end=5, axis=-1))
-    cls_pred = nd.sigmoid(prediction_1.slice_axis(begin=5, end=None, axis=-1))
-
-    return nd.concat(xy_pred, wh_pred, score_pred, cls_pred, dim=-1)
+    return nd.clip(iou, 1e-5, 1. - 1e-5)
 
 
 def predict_transform(prediction, input_dim, anchors):
-    if not isinstance(anchors, np.ndarray):
-        anchors = np.array(anchors)
+    ctx = prediction.context
+    if not isinstance(anchors, nd.NDArray):
+        anchors = nd.array(anchors, ctx=ctx)
+
     batch_size = prediction.shape[0]
     anchors_masks = [[6, 7, 8], [3, 4, 5], [0, 1, 2]]
     strides = [13, 26, 52]
@@ -91,38 +77,37 @@ def predict_transform(prediction, input_dim, anchors):
         stride = strides[i]
         grid = np.arange(stride)
         a, b = np.meshgrid(grid, grid)
-        x_offset = np.array(a.reshape((-1, 1)))
-        y_offset = np.array(b.reshape((-1, 1)))
+        x_offset = nd.array(a.reshape((-1, 1)), ctx=ctx)
+        y_offset = nd.array(b.reshape((-1, 1)), ctx=ctx)
         x_y_offset = \
-            np.repeat(
-                np.expand_dims(
-                    np.repeat(
-                        np.concatenate(
-                            (x_offset, y_offset), axis=1), repeats=3, axis=0
+            nd.repeat(
+                nd.expand_dims(
+                    nd.repeat(
+                        nd.concat(
+                            x_offset, y_offset, dim=1), repeats=3, axis=0
                     ).reshape((-1, 2)),
                     0
                 ),
                 repeats=batch_size, axis=0
             )
         tmp_anchors = \
-            np.repeat(
-                np.expand_dims(
-                    np.repeat(
-                        np.expand_dims(
+            nd.repeat(
+                nd.expand_dims(
+                    nd.repeat(
+                        nd.expand_dims(
                             anchors[anchors_masks[i]], 0
                         ),
                         repeats=stride * stride, axis=0
                     ).reshape((-1, 2)),
-                    axis=0
+                    0
                 ),
                 repeats=batch_size, axis=0
             )
 
-        prediction[:, step[i][0]:step[i][1], :2] += nd.array(x_y_offset, ctx=prediction.context)
+        prediction[:, step[i][0]:step[i][1], :2] += x_y_offset
         prediction[:, step[i][0]:step[i][1], :2] *= (float(input_dim) / stride)
         prediction[:, step[i][0]:step[i][1], 2:4] = \
-            nd.exp(nd.clip(prediction[:, step[i][0]:step[i][1], 2:4], a_min=0., a_max=10)) * \
-            nd.array(tmp_anchors, ctx=prediction.context)
+            nd.exp(nd.clip(prediction[:, step[i][0]:step[i][1], 2:4], a_min=0., a_max=10)) * tmp_anchors
 
     return prediction
 
@@ -144,8 +129,7 @@ def write_results(prediction, num_classes, confidence=0.5, nms_conf=0.4):
 
     for ind in range(batch_size):
         image_pred = prediction[ind]
-        # confidence threshholding
-        # NMS
+
         max_conf = nd.max(image_pred[:, 5:5 + num_classes], axis=1)
         max_conf_score = nd.argmax(image_pred[:, 5:5 + num_classes], axis=1)
         max_conf = max_conf.astype("float32").expand_dims(1)
@@ -182,7 +166,7 @@ def write_results(prediction, num_classes, confidence=0.5, nms_conf=0.4):
                     box1 = np.expand_dims(image_pred_class[i], 0)
                     box2 = image_pred_class[i + 1:]
                     box1 = np.repeat(box1, repeats=box2.shape[0], axis=0)
-                    ious = bbox_iou(box1, box2)
+                    ious = bbox_iou(box1, box2, transform=False).asnumpy()
                 except ValueError:
                     break
                 except IndexError:
@@ -408,23 +392,54 @@ def prep_label(label_file, classes):
 
 def prep_final_label(labels, num_classes, input_dim=416):
     ctx = labels.context
-    if isinstance(labels, nd.NDArray):
-        labels = labels.asnumpy()
-    anchors = np.array([(10, 13), (16, 30), (33, 23), (30, 61), (62, 45),
-                        (59, 119), (116, 90), (156, 198), (373, 326)])
+    anchors = nd.array([(10, 13), (16, 30), (33, 23), (30, 61), (62, 45),
+                        (59, 119), (116, 90), (156, 198), (373, 326)], ctx=ctx)
     anchors_mask = [[6, 7, 8], [3, 4, 5], [0, 1, 2]]
-    batch_size = labels.shape[0]
-    label_1 = np.zeros(shape=(batch_size, 13, 13, 3, num_classes + 5), dtype="float32")
-    label_2 = np.zeros(shape=(batch_size, 26, 26, 3, num_classes + 5), dtype="float32")
-    label_3 = np.zeros(shape=(batch_size, 52, 52, 3, num_classes + 5), dtype="float32")
 
-    true_label_1 = np.zeros(shape=(batch_size, 13, 13, 3, 5), dtype="float32")
-    true_label_2 = np.zeros(shape=(batch_size, 26, 26, 3, 5), dtype="float32")
-    true_label_3 = np.zeros(shape=(batch_size, 52, 52, 3, 5), dtype="float32")
+    label_1 = nd.zeros(shape=(13, 13, 3, num_classes + 5), dtype="float32", ctx=ctx)
+    label_2 = nd.zeros(shape=(26, 26, 3, num_classes + 5), dtype="float32", ctx=ctx)
+    label_3 = nd.zeros(shape=(52, 52, 3, num_classes + 5), dtype="float32", ctx=ctx)
+
+    true_label_1 = nd.zeros(shape=(13, 13, 3, 5), dtype="float32", ctx=ctx)
+    true_label_2 = nd.zeros(shape=(26, 26, 3, 5), dtype="float32", ctx=ctx)
+    true_label_3 = nd.zeros(shape=(52, 52, 3, 5), dtype="float32", ctx=ctx)
 
     label_list = [label_1, label_2, label_3]
     true_label_list = [true_label_1, true_label_2, true_label_3]
     for x_box in range(labels.shape[0]):
+<<<<<<< HEAD
+        if labels[x_box, 4] == 0.0:
+            break
+        for i in range(3):
+            stride = 2 ** i * 13
+            tmp_anchors = anchors[anchors_mask[i]]
+            tmp_xywh = nd.repeat(nd.expand_dims(labels[x_box, :4] * stride, axis=0),
+                                 repeats=tmp_anchors.shape[0], axis=0)
+            anchor_xywh = tmp_xywh.copy()
+            anchor_xywh[:, 2:4] = tmp_anchors / input_dim * stride
+            best_anchor = nd.argmax(bbox_iou(tmp_xywh, anchor_xywh), axis=0)
+            label = labels[x_box].copy()
+            tmp_idx = nd.floor(label[:2] * stride)
+            label[:2] = label[:2] * stride
+            label[:2] -= tmp_idx
+            tmp_idx = tmp_idx.astype("int")
+            label[2:4] = nd.log(label[2:4] * input_dim / tmp_anchors[best_anchor].reshape(-1) + 1e-12)
+
+            label_list[i][tmp_idx[1], tmp_idx[0], best_anchor] = label
+
+            true_xywhs = labels[x_box, :5] * input_dim
+            true_xywhs[4] = 1.0
+            true_label_list[i][tmp_idx[1], tmp_idx[0], best_anchor] = true_xywhs
+
+    t_y = nd.concat(label_1.reshape((-1, num_classes + 5)),
+                    label_2.reshape((-1, num_classes + 5)),
+                    label_3.reshape((-1, num_classes + 5)),
+                    dim=0)
+    t_xywhs = nd.concat(true_label_1.reshape((-1, 5)),
+                        true_label_2.reshape((-1, 5)),
+                        true_label_3.reshape((-1, 5)),
+                        dim=0)
+=======
         for y_box in range(labels.shape[1]):
             if labels[x_box, y_box, 4] == 0.0:
                 break
@@ -456,5 +471,6 @@ def prep_final_label(labels, num_classes, input_dim=416):
                               true_label_2.reshape((batch_size, -1, 5)),
                               true_label_3.reshape((batch_size, -1, 5))),
                              axis=1)
+>>>>>>> 1d70b0237b375e41b953a9f44ffeee398c522edf
 
     return t_y, t_xywhs

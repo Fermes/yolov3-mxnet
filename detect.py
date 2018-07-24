@@ -2,7 +2,7 @@ import os
 import time
 import argparse
 from utils import *
-from darknet import DarkNet
+from darknet import DarkNet, TinyDarkNet
 
 image_name = 0
 
@@ -17,13 +17,13 @@ def arg_parse():
     parser.add_argument("--classes", dest="classes", default="data/coco.names", type=str)
     parser.add_argument("--gpu", dest="gpu", help="gpu id", default="0", type=str)
     parser.add_argument("--dst_dir", dest='dst_dir', help=
-    "Image / Directory to store detections to",
-                        default="results", type=str)
+    "Image / Directory to store detections to", default="results", type=str)
     parser.add_argument("--batch_size", dest="batch_size", help="Batch size", default=16, type=int)
+    parser.add_argument("--tiny", dest="tiny", help="use yolov3-tiny", default=False, type=bool)
     parser.add_argument("--confidence", dest="confidence", help="Object Confidence", default=0.5, type=float)
     parser.add_argument("--nms_thresh", dest="nms_thresh", help="NMS Threshhold", default=0.4, type=float)
     parser.add_argument("--params", dest='params', help=
-    "params file", type=str)
+    "params file", default="models/yolov3.weights", type=str)
     parser.add_argument("--input_dim", dest='input_dim', help=
     "Input resolution of the network. Increase to increase accuracy. Decrease to increase speed",
                         default=416, type=int)
@@ -65,8 +65,8 @@ def parse_cfg(cfgfile):
 
 def draw_bbox(img, bboxs):
     for x in bboxs:
-        c1 = tuple(x[1:3].astype(np.int))
-        c2 = tuple(x[3:5].astype(np.int))
+        c1 = tuple(x[1:3].astype("int"))
+        c2 = tuple(x[3:5].astype("int"))
         cls = int(x[-1])
         # color = (random.randint(0, 255), random.randint(0, 255), random.randint(0, 255))
         color = (255, 0, 0)
@@ -87,13 +87,18 @@ def save_results(load_images, output, input_dim):
     scaling_factor = nd.min(input_dim / im_dim_list, axis=1).reshape((-1, 1))
     # scaling_factor = (416 / im_dim_list)[0].view(-1, 1)
 
+<<<<<<< HEAD
+    output[:, [1, 3]] -= (input_dim - scaling_factor * im_dim_list[:, 0].reshape((-1, 1))) / 2
+    output[:, [2, 4]] -= (input_dim - scaling_factor * im_dim_list[:, 1].reshape((-1, 1))) / 2
+=======
     output[:, [1, 3]] -= (input_dim - scaling_factor * im_dim_list[:, 0:1].reshape((-1, 1))) / 2
     output[:, [2, 4]] -= (input_dim - scaling_factor * im_dim_list[:, 1:2].reshape((-1, 1))) / 2
+>>>>>>> 1d70b0237b375e41b953a9f44ffeee398c522edf
     output[:, 1:5] /= scaling_factor
 
     for i in range(output.shape[0]):
-        output[i, [1, 3]] = nd.clip(output[i, [1, 3]], a_min=0.0, a_max=im_dim_list[i, 0].asscalar())
-        output[i, [2, 4]] = nd.clip(output[i, [2, 4]], a_min=0.0, a_max=im_dim_list[i, 1].asscalar())
+        output[i, [1, 3]] = nd.clip(output[i, [1, 3]], a_min=0.0, a_max=im_dim_list[i][0].asscalar())
+        output[i, [2, 4]] = nd.clip(output[i, [2, 4]], a_min=0.0, a_max=im_dim_list[i][1].asscalar())
 
     output = output.asnumpy()
     for i in range(len(load_images)):
@@ -107,7 +112,7 @@ def save_results(load_images, output, input_dim):
     image_name += len(load_images)
 
 
-def predict_video(net, ctx, video_file):
+def predict_video(net, ctx, video_file, anchors):
     if video_file:
         cap = cv2.VideoCapture(video_file)
     else:
@@ -118,32 +123,28 @@ def predict_video(net, ctx, video_file):
     result_video = cv2.VideoWriter(
         os.path.join(dst_dir, "result.avi"),
         cv2.VideoWriter_fourcc("X", "2", "6", "4"),
-        37,
+        25,
         (1280, 720)
     )
-    anchors = np.array([(10, 13), (16, 30), (33, 23), (30, 61), (62, 45),
-                       (59, 119), (116, 90), (156, 198), (373, 326)])
+
     detect_start = time.time()
     frame_num = 0
     while cap.isOpened():
-
         ret, frame = cap.read()
         if ret:
             frame_num += 1
+            if frame_num % 5 != 0:
+                continue
+            frame = cv2.resize(frame, (1280, 720), interpolation=cv2.INTER_CUBIC)
             img = nd.array(prep_image(frame, input_dim), ctx=ctx).expand_dims(0)
 
             prediction = predict_transform(net(img), input_dim, anchors)
-            prediction = write_results(prediction, num_classes, confidence=confidence, nms_conf=nms_thresh).asnumpy()
+            prediction = write_results(prediction, num_classes, confidence=confidence, nms_conf=nms_thresh)
 
-            if type(prediction) == int:
-                frame_num += 1
-                print("FPS of the video is {:5.3f}".format(frame_num / (time.time() - detect_start)))
+            if prediction is None:
                 result_video.write(frame)
-                # cv2.imshow("frame", frame)
-                # key = cv2.waitKey(1)
-                # if key & 0xFF == ord('q'):
-                #     break
                 continue
+
             scaling_factor = min(input_dim / frame.shape[0], input_dim / frame.shape[1])
 
             prediction[:, [1, 3]] -= (input_dim - scaling_factor * frame.shape[1]) / 2
@@ -151,9 +152,10 @@ def predict_video(net, ctx, video_file):
             prediction[:, 1:5] /= scaling_factor
 
             for i in range(prediction.shape[0]):
-                prediction[i, [1, 3]] = np.clip(prediction[i, [1, 3]], 0.0, frame.shape[1])
-                prediction[i, [2, 4]] = np.clip(prediction[i, [2, 4]], 0.0, frame.shape[0])
+                prediction[i, [1, 3]] = nd.clip(prediction[i, [1, 3]], 0.0, frame.shape[1])
+                prediction[i, [2, 4]] = nd.clip(prediction[i, [2, 4]], 0.0, frame.shape[0])
 
+            prediction = prediction.asnumpy()
             draw_bbox(frame, prediction)
 
             result_video.write(frame)
@@ -165,7 +167,7 @@ def predict_video(net, ctx, video_file):
             # print(time.time() - start)
             if frame_num % 100 == 0:
                 t = time.time() - detect_start
-                print("FPS of the video is {:5.2f}\n Per Image Cost Time{:5.3f}".format(100 / t,
+                print("FPS of the video is {:5.2f}\nPer Image Cost Time {:5.3f}".format(100 / t,
                                                                                         t / 100))
                 detect_start = time.time()
 
@@ -185,13 +187,18 @@ if __name__ == '__main__':
     input_dim = args.input_dim
     dst_dir = args.dst_dir
     start = 0
-    # classes = load_classes("data/coco.names")
     classes = load_classes(args.classes)
 
     gpu = [int(x) for x in args.gpu.replace(" ", "").split(",")]
     ctx = try_gpu(args.gpu)[0]
     num_classes = len(classes)
-    net = DarkNet(input_dim=input_dim, num_classes=num_classes)
+    if args.tiny:
+        net = TinyDarkNet(input_dim=input_dim, num_classes=num_classes)
+        anchors = np.array([(10, 14), (23, 27), (37, 58), (81, 82), (135, 169), (344, 319)])
+    else:
+        net = DarkNet(input_dim=input_dim, num_classes=num_classes)
+        anchors = np.array([(10, 13), (16, 30), (33, 23), (30, 61), (62, 45),
+                            (59, 119), (116, 90), (156, 198), (373, 326)])
     net.initialize(ctx=ctx)
     input_dim = args.input_dim
 
@@ -205,15 +212,20 @@ if __name__ == '__main__':
     if not os.path.exists(dst_dir):
         os.mkdir(dst_dir)
 
-    tmp_batch = nd.uniform(shape=(1, 3, args.input_dim, args.input_dim), ctx=ctx)
-    net(tmp_batch)
-    if args.params:
+    if args.params.endswith(".params"):
         net.load_params(args.params)
+    elif args.params.endswith(".weights"):
+        tmp_batch = nd.uniform(shape=(1, 3, args.input_dim, args.input_dim), ctx=ctx)
+        net(tmp_batch)
+        net.load_weights(args.params, fine_tune=False)
     else:
-        net.load_weights("./data/yolov3.weights", fine_tune=False)
+        print("params {} load error!".format(args.params))
+        exit()
+    print("load params: {}".format(args.params))
+    net.hybridize()
 
     if args.video:
-        predict_video(net, ctx=ctx, video_file=args.video)
+        predict_video(net, ctx=ctx, video_file=args.video, anchors=anchors)
         exit()
 
     if not imlist:
@@ -228,8 +240,7 @@ if __name__ == '__main__':
                   for i in range(num_batches)]
 
     start_det_loop = time.time()
-    anchors = np.array([(10, 13), (16, 30), (33, 23), (30, 61), (62, 45),
-                       (59, 119), (116, 90), (156, 198), (373, 326)])
+
     output = None
     for i, batch in enumerate(im_batches):
         load_images = [cv2.imread(img) for img in batch]
@@ -241,25 +252,15 @@ if __name__ == '__main__':
 
         end = time.time()
 
-        if type(prediction) == int:
-            for im_num, image in enumerate(imlist[i * batch_size: min((i + 1) * batch_size, len(imlist))]):
-                im_id = i * batch_size + im_num
-                print("{0:20s} predicted in {1:6.3f} seconds".format(image.split("/")[-1], (end - start) / batch_size))
-                print("----------------------------------------------------------")
-            continue
-
-        # prediction[:, 0] += i * batch_size  # transform the atribute from index in batch to index in imlist
-
-        if output is None:  # If we have't initialised output
+        if output is None:
             output = prediction
         else:
             output = nd.concat(output, prediction, dim=0)
 
-        for image in batch:
-            print("{0:20s} predicted in {1:6.3f} seconds".format(image.split("/")[-1], (end - start) / len(batch)))
-            print("----------------------------------------------------------")
+        print("{0} predicted in {1:6.3f} seconds".format(len(load_images), (end - start) / len(batch)))
+        print("----------------------------------------------------------")
 
-        if not output is None:
+        if output is not None:
             save_results(load_images, output, input_dim=input_dim)
         else:
             print("No detections were made")

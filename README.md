@@ -1,12 +1,23 @@
 # yolov3-mxnet
 A yolov3 simple implementation in MXNet, based on version 1.2.0 and cuda 9.0(optional), python3.
 Works on Windows and Ubuntu 16.04.
+<<<<<<< HEAD
+<br>
+<br>
+**new: hybridized, speed up.**
+**new: try train.**
+<br>
+<br>
+**Detect Part Completed.**
+=======
 
 **Detect Part Completed.<br>
 Train Part is still semi-finished, sorry.<br>
 Working......**
+>>>>>>> 1d70b0237b375e41b953a9f44ffeee398c522edf
 
 ## Table of Contents
+
 - [yolov3-mxnet](#yolov3-mxnet)
   * [Paper](#paper)
   * [Installation](#installation)
@@ -15,10 +26,14 @@ Working......**
   * [Credit](#credit)
 
 ## Paper
-### YOLOv3: An Incremental Improvement
-_Joseph Redmon, Ali Farhadi_ <br>
 
-**Abstract** <br>
+### YOLOv3: An Incremental Improvement
+
+_Joseph Redmon, Ali Farhadi_
+<br \>
+
+**Abstract**
+<br \>
 We present some updates to YOLO! We made a bunch
 of little design changes to make it better. We also trained
 this new network that’s pretty swell. It’s a little bigger than
@@ -34,11 +49,17 @@ https://pjreddie.com/yolo/.
 [[Paper]](https://pjreddie.com/media/files/papers/YOLOv3.pdf) [[Original Implementation]](https://github.com/pjreddie/darknet)
 
 ## Installation
+
     $ git clone https://github.com/eriklindernoren/PyTorch-YOLOv3
     $ cd PyTorch-YOLOv3/
     $ sudo pip3 install opencv-python mxnet-cu90==1.2.0
 
+<<<<<<< HEAD
+##### Detection
+
+=======
 ## Detection
+>>>>>>> 1d70b0237b375e41b953a9f44ffeee398c522edf
 put your images in ./images, and
 
     $ python detect.py [--gpu GPU ID]
@@ -51,6 +72,7 @@ or you can detect a video file, this need your opencv is compiled with ffmpeg.
 you will get result.avi in ./results
 
 ## Train (for reference only)
+
 The IMAGE_FOLDER should contains two directorys, "train" and "train_label", (or four, "train", "train_label", "val", "val_label") label should be xml file like VOC's format.
 PS: You can use voc_label.py in https://pjreddie.com/darknet/yolo/ to get train.txt and val.txt, set path to --train and --val instead of --images.
 ```
@@ -62,6 +84,7 @@ PS: You can use voc_label.py in https://pjreddie.com/darknet/yolo/ to get train.
 ```
 
 ## Credit
+
 ```
 @article{yolov3,
   title={YOLOv3: An Incremental Improvement},
