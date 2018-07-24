@@ -51,12 +51,9 @@ https://pjreddie.com/yolo/.
     $ cd PyTorch-YOLOv3/
     $ sudo pip3 install opencv-python mxnet-cu90==1.2.0
 
-<<<<<<< HEAD
-##### Detection
 
-=======
 ## Detection
->>>>>>> 1d70b0237b375e41b953a9f44ffeee398c522edf
+
 put your images in ./images, and
 
     $ python detect.py [--gpu GPU ID]
