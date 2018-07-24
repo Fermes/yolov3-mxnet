@@ -47,8 +47,8 @@ https://pjreddie.com/yolo/.
 
 ## Installation
 
-    $ git clone https://github.com/eriklindernoren/PyTorch-YOLOv3
-    $ cd PyTorch-YOLOv3/
+    $ git clone https://github.com/Fermes/yolov3-mxnet.git
+    $ cd yolov3-mxnet/
     $ sudo pip3 install opencv-python mxnet-cu90==1.2.0
 
 ## Detection
