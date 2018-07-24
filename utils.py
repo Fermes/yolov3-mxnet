@@ -407,7 +407,6 @@ def prep_final_label(labels, num_classes, input_dim=416):
     label_list = [label_1, label_2, label_3]
     true_label_list = [true_label_1, true_label_2, true_label_3]
     for x_box in range(labels.shape[0]):
-<<<<<<< HEAD
         if labels[x_box, 4] == 0.0:
             break
         for i in range(3):
@@ -439,38 +438,5 @@ def prep_final_label(labels, num_classes, input_dim=416):
                         true_label_2.reshape((-1, 5)),
                         true_label_3.reshape((-1, 5)),
                         dim=0)
-=======
-        for y_box in range(labels.shape[1]):
-            if labels[x_box, y_box, 4] == 0.0:
-                break
-            for i in range(3):
-                stride = np.power(2, i) * 13
-                tmp_anchors = anchors[anchors_mask[i]]
-                tmp_xywh = np.repeat(np.expand_dims(labels[x_box, y_box, :4] * stride, axis=0),
-                                     repeats=tmp_anchors.shape[0], axis=0)
-                anchor_xywh = tmp_xywh.copy()
-                anchor_xywh[:, 2:4] = tmp_anchors / input_dim * stride
-                best_anchor = np.argmax(bbox_iou(tmp_xywh, anchor_xywh), axis=0)
-                label = labels[x_box, y_box].copy()
-                tmp_idx = (label[:2] * stride).astype("int")
-                label[:2] = label[:2] * stride
-                label[:2] -= tmp_idx
-                label[2:4] = np.log(label[2:4] * input_dim / tmp_anchors[best_anchor] + 1e-16)
-
-                label_list[i][x_box, tmp_idx[1], tmp_idx[0], best_anchor] = label
-
-                true_xywhs = labels[x_box, y_box, :5] * input_dim
-                true_xywhs[4] = 1.0
-                true_label_list[i][x_box, tmp_idx[1], tmp_idx[0], best_anchor] = true_xywhs
-                
-    t_y = nd.concat(nd.array(label_1.reshape((batch_size, -1, num_classes + 5)), ctx=ctx),
-                    nd.array(label_2.reshape((batch_size, -1, num_classes + 5)), ctx=ctx),
-                    nd.array(label_3.reshape((batch_size, -1, num_classes + 5)), ctx=ctx),
-                    dim=1)
-    t_xywhs = np.concatenate((true_label_1.reshape((batch_size, -1, 5)),
-                              true_label_2.reshape((batch_size, -1, 5)),
-                              true_label_3.reshape((batch_size, -1, 5))),
-                             axis=1)
->>>>>>> 1d70b0237b375e41b953a9f44ffeee398c522edf
 
     return t_y, t_xywhs

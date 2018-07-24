@@ -10,11 +10,8 @@ Works on Windows and Ubuntu 16.04.
 <br>
 <br>
 **Detect Part Completed.**
+<br>
 =======
-
-**Detect Part Completed.<br>
-Train Part is still semi-finished, sorry.<br>
-Working......**
 
 ## Table of Contents
 

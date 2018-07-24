@@ -87,13 +87,8 @@ def save_results(load_images, output, input_dim):
     scaling_factor = nd.min(input_dim / im_dim_list, axis=1).reshape((-1, 1))
     # scaling_factor = (416 / im_dim_list)[0].view(-1, 1)
 
-<<<<<<< HEAD
     output[:, [1, 3]] -= (input_dim - scaling_factor * im_dim_list[:, 0].reshape((-1, 1))) / 2
     output[:, [2, 4]] -= (input_dim - scaling_factor * im_dim_list[:, 1].reshape((-1, 1))) / 2
-=======
-    output[:, [1, 3]] -= (input_dim - scaling_factor * im_dim_list[:, 0:1].reshape((-1, 1))) / 2
-    output[:, [2, 4]] -= (input_dim - scaling_factor * im_dim_list[:, 1:2].reshape((-1, 1))) / 2
->>>>>>> 1d70b0237b375e41b953a9f44ffeee398c522edf
     output[:, 1:5] /= scaling_factor
 
     for i in range(output.shape[0]):
