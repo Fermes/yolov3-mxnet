@@ -5,6 +5,7 @@ Works on Windows and Ubuntu 16.04.
 <br>
 <br>
 **new: hybridized, speed up.**
+<br>
 **new: train demo.**
 <br>
 <br>
