@@ -1,7 +1,7 @@
 # yolov3-mxnet
 A yolov3 simple implementation in MXNet, based on version 1.2.0 and cuda 9.0(optional), python3.
 Works on Windows and Ubuntu 16.04.
-<<<<<<< HEAD
+
 <br>
 <br>
 **new: hybridized, speed up.**
@@ -14,7 +14,6 @@ Works on Windows and Ubuntu 16.04.
 **Detect Part Completed.<br>
 Train Part is still semi-finished, sorry.<br>
 Working......**
->>>>>>> 1d70b0237b375e41b953a9f44ffeee398c522edf
 
 ## Table of Contents
 
