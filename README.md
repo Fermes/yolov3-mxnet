@@ -5,7 +5,7 @@ Works on Windows and Ubuntu 16.04.
 <br>
 <br>
 **new: hybridized, speed up.**
-**new: try train.**
+**new: train demo.**
 <br>
 <br>
 **Detect Part Completed.**
