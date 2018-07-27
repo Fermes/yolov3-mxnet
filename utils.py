@@ -191,30 +191,32 @@ def write_results(prediction, num_classes, confidence=0.5, nms_conf=0.4):
     return output
 
 
-def letterbox_image(img, inp_dim):
-    # resize image with unchanged aspect ratio using padding
+def letterbox_image(img, inp_dim, labels=None):
     img_w, img_h = img.shape[1], img.shape[0]
     w, h = inp_dim
     new_w = int(img_w * min(w / img_w, h / img_h))
     new_h = int(img_h * min(w / img_w, h / img_h))
     resized_image = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
-
-    canvas = np.full((inp_dim[1], inp_dim[0], 3), 128)
+    if labels is not None:
+        mask = labels > 0.
+        labels[:, 1] = (labels[:, 1] * new_w + (w - new_w) // 2) / w
+        labels[:, 2] = (labels[:, 2] * new_h + (h - new_h) // 2) / h
+        labels[:, 3] = labels[:, 3] * new_w / w
+        labels[:, 4] = labels[:, 4] * new_h / h
+        labels *= mask
+    canvas = np.full((inp_dim[1], inp_dim[0], 3), 128, dtype=np.uint8)
 
     canvas[(h - new_h) // 2:(h - new_h) // 2 + new_h, (w - new_w) // 2:(w - new_w) // 2 + new_w, :] = resized_image
 
-    return canvas
+    return canvas, labels
 
 
-def prep_image(img, inp_dim):
-    """
-    Prepare image for inputting to the neural network.
-
-    Returns a Variable
-    """
-    img = (letterbox_image(img, (inp_dim, inp_dim)))
+def prep_image(img, inp_dim, labels=None):
+    img, labels = letterbox_image(img, (inp_dim, inp_dim), labels)
     img = np.transpose(img[:, :, ::-1], (2, 0, 1)).astype("float32")
     img /= 255.0
+    if labels is not None:
+        return img, labels
     return img
 
 

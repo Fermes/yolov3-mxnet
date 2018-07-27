@@ -93,10 +93,10 @@ class YoloDataSet(gluon.data.Dataset):
 
     def __getitem__(self, idx):
         image = cv2.imread(self.image_list[idx])
-        image = nd.array(prep_image(image, self.input_dim))
         label = prep_label(self.label_list[idx], classes=self.classes)
+        image, label = prep_image(image, self.input_dim, label)
         label, true_xywhc = prep_final_label(label, len(self.classes), input_dim=self.input_dim)
-        return image.squeeze(), label.squeeze(), true_xywhc.squeeze()
+        return nd.array(image).squeeze(), label.squeeze(), true_xywhc.squeeze()
 
 
 if __name__ == '__main__':
