@@ -165,6 +165,8 @@ def write_results(prediction, num_classes, confidence=0.5, nms_conf=0.4):
                 try:
                     box1 = np.expand_dims(image_pred_class[i], 0)
                     box2 = image_pred_class[i + 1:]
+                    if len(box2) == 0:
+                        break
                     box1 = np.repeat(box1, repeats=box2.shape[0], axis=0)
                     ious = bbox_iou(box1, box2, transform=False).asnumpy()
                 except ValueError:
