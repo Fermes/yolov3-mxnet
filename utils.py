@@ -107,7 +107,7 @@ def predict_transform(prediction, input_dim, anchors):
         prediction[:, step[i][0]:step[i][1], :2] += x_y_offset
         prediction[:, step[i][0]:step[i][1], :2] *= (float(input_dim) / stride)
         prediction[:, step[i][0]:step[i][1], 2:4] = \
-            nd.exp(nd.clip(prediction[:, step[i][0]:step[i][1], 2:4], a_min=0., a_max=10)) * tmp_anchors
+            nd.exp(prediction[:, step[i][0]:step[i][1], 2:4]) * tmp_anchors
 
     return prediction
 
