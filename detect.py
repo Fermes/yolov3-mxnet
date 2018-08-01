@@ -23,7 +23,7 @@ def arg_parse():
     parser.add_argument("--confidence", dest="confidence", help="Object Confidence", default=0.5, type=float)
     parser.add_argument("--nms_thresh", dest="nms_thresh", help="NMS Threshhold", default=0.4, type=float)
     parser.add_argument("--params", dest='params', help=
-    "params file", default="models/yolov3.weights", type=str)
+    "params file", default="data/yolov3.weights", type=str)
     parser.add_argument("--input_dim", dest='input_dim', help=
     "Input resolution of the network. Increase to increase accuracy. Decrease to increase speed",
                         default=416, type=int)
