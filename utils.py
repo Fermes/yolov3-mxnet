@@ -23,9 +23,10 @@ def try_gpu(num_list):
 
 
 def bbox_iou(box1, box2, transform=True):
-    """
-    Returns the IoU of two bounding boxes
-    """
+    if not isinstance(box1, nd.NDArray):
+        box1 = nd.array(box1)
+    if not isinstance(box2, nd.NDArray):
+        box2 = nd.array(box2)
     box1 = nd.abs(box1)
     box2 = nd.abs(box2)
     if transform:
